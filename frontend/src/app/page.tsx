@@ -36,8 +36,9 @@ export default function Home() {
         setHealthErr(null);
         const data = await fetchJSON<HealthRes>(`${apiBaseSafe}/health`, { cache: 'no-store' });
         setHealth(data);
-      } catch (e: any) {
-        setHealthErr(e?.message ?? '헬스 체크 실패');
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setHealthErr(msg || '헬스 체크 실패');
       } finally {
         setHealthLoading(false);
       }
@@ -54,8 +55,9 @@ export default function Home() {
         body: JSON.stringify({ text }),
       });
       setUpper(data);
-    } catch (e: any) {
-      setUpperErr(e?.message ?? '변환 실패');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setUpperErr(msg || '변환 실패');
     } finally {
       setUpperLoading(false);
     }
@@ -68,8 +70,9 @@ export default function Home() {
       const params = new URLSearchParams({ min: String(min), max: String(max) });
       const data = await fetchJSON<RandomRes>(`${apiBaseSafe}/random?${params.toString()}`, { cache: 'no-store' });
       setRand(data);
-    } catch (e: any) {
-      setRandErr(e?.message ?? '난수 생성 실패');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setRandErr(msg || '난수 생성 실패');
     } finally {
       setRandLoading(false);
     }

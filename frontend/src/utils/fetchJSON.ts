@@ -11,7 +11,7 @@ export async function fetchJSON<T>(input: RequestInfo, init?: RequestInit): Prom
       try {
         const j = JSON.parse(text);
         msg = j.error || j.message || msg;
-      } catch (_) {
+      } catch {
         // JSON 파싱 실패 시 기본 메시지 유지
       }
     }
@@ -21,7 +21,7 @@ export async function fetchJSON<T>(input: RequestInfo, init?: RequestInit): Prom
   if (contentType.includes('application/json')) {
     try {
       return JSON.parse(text) as T;
-    } catch (_) {
+    } catch {
       throw new Error('서버 응답(JSON) 파싱에 실패했습니다.');
     }
   }
