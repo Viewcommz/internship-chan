@@ -5,7 +5,7 @@ import { fetchJSON } from '../utils/fetchJSON';
 import { HealthRes, UppercaseRes, RandomRes } from '../type/types';
 
 // 백엔드 API 베이스 URL: 환경변수(NEXT_PUBLIC_API_BASE) 우선, 없으면 로컬 기본값
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3000';
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:50001';
 
 export default function Home() {
   // Health

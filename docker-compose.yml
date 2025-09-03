@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    container_name: internship-backend
+    expose:
+      - "3000"
+    ports:
+      - "50001:3000"
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: internship-frontend
+    env_file:
+      - ./frontend/.env  # frontend용 환경 변수 파일
+    expose:
+      - "3000"
+    ports:
+      - "50002:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
