@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const WebSocket = require('ws');
+const crypto = require('crypto'); // crypto 모듈 추가
 
 const app = express();
 
@@ -12,6 +13,30 @@ app.use(cors({
 app.use(express.json());
 
 const port = 3001; // 포트 변경 (프론트와 겹치지 않게)
+
+/*--- 인증 로직 ---*/
+const SECRET_HASH_VALUE = "2466fcafe0531db08547f61d39bd340224e92f3410d58837e04cb845d790b970";
+
+const hash = (text) => {
+  return crypto.createHash('sha256').update(text).digest('hex');
+}
+
+app.post('/api/verify-key', (req, res) => {
+  const { key, user } = req.body;
+
+  if (!key || !user) {
+    return res.status(400).json({ error: 'user와 key를 모두 제공해야 합니다.' });
+  }
+
+  const keyHash = hash(key);
+  if (keyHash === SECRET_HASH_VALUE) {
+    // TODO: 인증 성공 시 토큰 발급 로직 추가 예정
+    res.json({ success: true, message: '인증에 성공했습니다.' });
+  } else {
+    res.status(401).json({ success: false, message: '키가 올바르지 않습니다.' });
+  }
+});
+/*--- API 라우트 ---*/
 
 // test api
 app.get('/', (req, res) => {
