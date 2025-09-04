@@ -1,14 +1,70 @@
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
+const { createServer } = require('http');
+const { Server } = require('socket.io');
+
 const app = express();
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: {
+    origin: ['http://localhost:3000', 'http://localhost:5500', 'http://127.0.0.1:5500', 'https://chan.gling.co.kr'],
+    methods: ['GET', 'POST'],
+    credentials: true
+  },
+  pingTimeout: 5000,
+  pingInterval: 2000,
+  transports: ['websocket', 'polling']
+});
 
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://chan.gling.co.kr'],
+  origin: ['http://localhost:3000', 'http://localhost:5500', 'https://chan.gling.co.kr'],
 }));
 
 app.use(express.json());
 
 const port = 3000;
+
+// 데이터 저장소
+const connectedUsers = new Map(); // socketId -> { username, mouseX, mouseY }
+const sessions = new Map(); // username -> { token, socketId }
+const seats = {
+  1: { owner: null, solving: null },
+  2: { owner: null, solving: null },
+  3: { owner: null, solving: null },
+  4: { owner: null, solving: null },
+  5: { owner: null, solving: null },
+  6: { owner: null, solving: null },
+  7: { owner: null, solving: null },
+  8: { owner: null, solving: null }
+};
+
+// 문제 데이터
+const questions = {
+  1: { question: "1 + 1 = ?", answer: "2" },
+  2: { question: "대한민국의 수도는?", answer: "서울" },
+  3: { question: "2 * 3 = ?", answer: "6" },
+  4: { question: "React를 만든 회사는?", answer: "페이스북" },
+  5: { question: "JavaScript에서 배열인지 확인하는 메서드는?", answer: "Array.isArray" },
+  6: { question: "HTTP 성공 상태 코드는?", answer: "200" },
+  7: { question: "Git에서 현재 브랜치 확인 명령어는?", answer: "git branch" },
+  8: { question: "CSS에서 박스 모델의 가장 바깥 속성은?", answer: "margin" }
+};
+
+// 비밀 키 (프론트엔드와 동일)
+const SECRET_HASH_VALUE = "2466fcafe0531db08547f61d39bd340224e92f3410d58837e04cb845d790b970";
+
+// SHA-256 해시 함수
+const hash = async (text) => {
+  const hasher = crypto.createHash('sha256');
+  hasher.update(text);
+  return hasher.digest('hex');
+};
+
+// 토큰 생성
+const generateToken = () => {
+  return crypto.randomBytes(32).toString('hex');
+};
 
 // test api
 app.get('/', (req, res) => {
@@ -24,7 +80,198 @@ app.get('/health', (req, res) => {
   });
 });
 
-// 대문자로 바꿔주는 api
+// 인증 API
+app.post('/api/auth/verify', async (req, res) => {
+  const { username, key } = req.body;
+  
+  if (!username || !key) {
+    return res.status(400).json({ error: '유저명과 키를 입력해주세요' });
+  }
+  
+  const keyHash = await hash(key);
+  if (keyHash !== SECRET_HASH_VALUE) {
+    return res.status(401).json({ error: '키가 올바르지 않습니다' });
+  }
+  
+  // 이미 연결된 유저인지 확인
+  if (sessions.has(username)) {
+    return res.status(409).json({ error: '이미 접속 중인 유저입니다' });
+  }
+  
+  const token = generateToken();
+  sessions.set(username, { token, socketId: null });
+  
+  res.json({ success: true, token, username });
+});
+
+// 자리 목록 조회 API
+app.get('/api/seats', (req, res) => {
+  res.json({ seats });
+});
+
+// 문제 요청 API
+app.post('/api/question', (req, res) => {
+  const { username, seatNumber } = req.body;
+  
+  if (!username || !seatNumber) {
+    return res.status(400).json({ error: '유저명과 자리 번호를 입력해주세요' });
+  }
+  
+  const seat = seats[seatNumber];
+  if (!seat) {
+    return res.status(404).json({ error: '존재하지 않는 자리입니다' });
+  }
+  
+  if (seat.owner) {
+    return res.status(409).json({ error: '이미 선점된 자리입니다', owner: seat.owner });
+  }
+  
+  // 문제 풀이 중으로 표시
+  seat.solving = username;
+  
+  const question = questions[seatNumber];
+  res.json({ 
+    seatNumber,
+    question: question.question
+  });
+  
+  // 자리 상태 업데이트 브로드캐스트
+  io.emit('seats:update', { seats });
+});
+
+// 정답 제출 API
+app.post('/api/answer', (req, res) => {
+  const { username, seatNumber, answer } = req.body;
+  
+  if (!username || !seatNumber || !answer) {
+    return res.status(400).json({ error: '필수 정보가 누락되었습니다' });
+  }
+  
+  const seat = seats[seatNumber];
+  const question = questions[seatNumber];
+  
+  if (!seat || !question) {
+    return res.status(404).json({ error: '잘못된 자리 번호입니다' });
+  }
+  
+  // 정답 확인
+  const isCorrect = answer.trim().toLowerCase() === question.answer.toLowerCase();
+  
+  if (isCorrect) {
+    // 자리 소유자 설정
+    seat.owner = username;
+    seat.solving = null;
+    
+    // 모든 유저에게 성공 알림
+    io.emit('answer:correct', { username, seatNumber });
+    io.emit('seats:update', { seats });
+    
+    res.json({ success: true, message: '정답입니다!' });
+  } else {
+    // 틀렸을 경우 풀이 중 상태 해제
+    seat.solving = null;
+    io.emit('seats:update', { seats });
+    
+    res.status(400).json({ success: false, message: '틀렸습니다. 다시 시도해주세요.' });
+  }
+});
+
+// 웹소켓 연결 처리
+io.on('connection', (socket) => {
+  console.log('새 유저 연결:', socket.id);
+  
+  // 유저 인증 및 등록
+  socket.on('user:auth', ({ username, token }) => {
+    const session = sessions.get(username);
+    
+    if (!session || session.token !== token) {
+      socket.emit('auth:failed', { error: '인증 실패' });
+      socket.disconnect();
+      return;
+    }
+    
+    // 이미 다른 소켓이 연결되어 있으면 끊기
+    if (session.socketId && session.socketId !== socket.id) {
+      const oldSocket = io.sockets.sockets.get(session.socketId);
+      if (oldSocket) {
+        oldSocket.emit('auth:duplicate', { error: '다른 곳에서 접속했습니다' });
+        oldSocket.disconnect();
+      }
+    }
+    
+    // 새 소켓 연결 등록
+    session.socketId = socket.id;
+    connectedUsers.set(socket.id, { username, mouseX: 0, mouseY: 0 });
+    
+    // 현재 연결된 모든 유저 정보 전송
+    const allUsers = Array.from(connectedUsers.entries()).map(([id, data]) => ({
+      socketId: id,
+      ...data
+    }));
+    
+    socket.emit('auth:success', { username });
+    socket.emit('users:list', allUsers);
+    socket.emit('seats:update', { seats });
+    
+    // 다른 유저들에게 새 유저 알림
+    socket.broadcast.emit('user:connected', { 
+      socketId: socket.id,
+      username,
+      mouseX: 0,
+      mouseY: 0
+    });
+  });
+  
+  // 마우스 위치 업데이트
+  socket.on('mouse:move', ({ x, y }) => {
+    const user = connectedUsers.get(socket.id);
+    if (user) {
+      user.mouseX = x;
+      user.mouseY = y;
+      
+      // 다른 유저들에게 브로드캐스트
+      socket.broadcast.emit('mouse:update', {
+        socketId: socket.id,
+        username: user.username,
+        x,
+        y
+      });
+    }
+  });
+  
+  // 연결 종료 처리
+  socket.on('disconnect', (reason) => {
+    console.log('유저 연결 종료:', socket.id, '이유:', reason);
+    const user = connectedUsers.get(socket.id);
+    if (user) {
+      // 세션에서 제거 (페이지 새로고침/종료 시 완전 제거)
+      const session = sessions.get(user.username);
+      if (session && session.socketId === socket.id) {
+        // 브라우저 종료나 새로고침인 경우 세션도 삭제
+        if (reason === 'transport close' || reason === 'client namespace disconnect') {
+          sessions.delete(user.username);
+        } else {
+          session.socketId = null;
+        }
+      }
+      
+      // 풀이 중인 자리가 있으면 해제
+      Object.values(seats).forEach(seat => {
+        if (seat.solving === user.username) {
+          seat.solving = null;
+        }
+      });
+      
+      connectedUsers.delete(socket.id);
+      
+      // 다른 유저들에게 알림
+      socket.broadcast.emit('user:disconnected', { socketId: socket.id });
+      io.emit('seats:update', { seats });
+    }
+  });
+});
+
+// 대문자로 바꿔주는 api (기존 유지)
 app.post('/uppercase', (req, res) => {
   const { text } = req.body || {};
   if (typeof text !== 'string') {
@@ -33,7 +280,7 @@ app.post('/uppercase', (req, res) => {
   res.json({ original: text, uppercased: text.toUpperCase() });
 });
 
-// 랜덤 숫자 생성 api
+// 랜덤 숫자 생성 api (기존 유지)
 app.get('/random', (req, res) => {
   const qmin = Number(req.query.min);
   const qmax = Number(req.query.max);
@@ -69,6 +316,8 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(port, () => {
+// HTTP 서버와 Socket.IO 함께 시작
+httpServer.listen(port, () => {
   console.log(`서버가 http://localhost:${port} 에서 실행 중입니다. 🚀`);
+  console.log(`Socket.IO 서버도 함께 실행 중입니다. 🔌`);
 });
