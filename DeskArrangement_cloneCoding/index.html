@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>자리배치를 해봅시다</title>
+  <!-- tailwind css -->
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<script>
+  /* 화면 분기 로직 */
+
+  // 화면을 안 보이게 세팅하는 함수
+  const setHiddenView = (targetId) => {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+    el.classList.add('hidden');
+  }
+
+  // 화면을 보이게 세팅하는 함수
+  const setShowView = (targetId) => {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+    el.classList.remove('hidden');
+  }
+
+  // 화면 상태  
+  const ViewState = {
+    INIT: "initView",
+    SELECT: "selectView",
+    QUESTION: "questionView"
+  };
+
+  // 화면 관리 객체
+  const View = (() => {
+    let currentView = null // 외부 접근 불가
+
+    // 현재 화면 상태 조회
+    const getCurrentView = () => {
+      return currentView;
+    }
+
+    // 화면 상태 set 
+    const setViewState = (state) => { // 인자: 상태
+      // 인증된 유저만 자리선택 페이지 이동 가능
+      if (state == ViewState.SELECT) {
+        if (!User.getUser()) return;
+      }
+      // 화면 변화 로직
+      [...Object.values(ViewState)].forEach(setHiddenView);
+      setShowView(state);
+      currentView = state
+    }
+
+    return Object.freeze({
+      getCurrentView,
+      setViewState
+    });
+  })(); // 즉시 실행
+
+  /* 키 검증 로직 -> 추 후 백엔드로! */
+  // 키 (해시값)
+  const SECRET_HASH_VALUE = "2466fcafe0531db08547f61d39bd340224e92f3410d58837e04cb845d790b970";
+
+  // SHA-256 해시 함수 (hex)
+  const hash = async (text) => {
+    const data = new TextEncoder().encode(text);
+    const digest = await crypto.subtle.digest('SHA-256', data);
+    const bytes = Array.from(new Uint8Array(digest));
+    return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // 키 검증
+  const verifyKey = async (key) => {
+    const keyHash = await hash(key);
+    return keyHash === SECRET_HASH_VALUE;
+  }
+
+  /* 유저 선택 로직 */
+  const Users = {
+    gray: "그레이",
+    cindy: "신디",
+    estelle: "에스텔",
+    gardener: "가드너",
+    chan: "찬",
+    kitty: "키티",
+  }
+
+  // 유저 관리 객체
+  const User = (() => {
+    let currentUser = null // 외부 접근 불가
+
+    // 현재 유저 조회(인증된)
+    const getUser = () => {
+      return currentUser;
+    }
+
+    // 유저 선택(이 함수를 통해서만 유저 변경)
+    const setUser = async (user, key) => {
+      if (!user) {
+        showError('닉네임을 선택해주세요');
+        return false;
+      }
+      if (!key) {
+        showError('키를 입력해주세요');
+        return false;
+      }
+      if (!(await verifyKey(key))) {
+        showError('키가 틀렸어요');
+        return false;
+      }
+
+      currentUser = user
+      return true;
+    }
+
+    // 유저를 널로 바꾸는 함수(이미 해당 닉네임으로 서버에 소켓 연결 시)
+    const setNull = () => {
+      currentUser = null
+    }
+
+    return Object.freeze({
+      getUser,
+      setUser,
+      setNull
+    });
+  })(); // 즉시 실행
+  
+  // 이미 서버에 닉네임 로그인 시 -> 초기 화면으로
+  // 초기 화면으로 돌아가는 로직 
+  const backInit = () => {
+    User.setNull()
+    View.setViewState(ViewState.INIT)
+  }
+
+  const start = async (selectedUser, key) => {
+    // 입력된 값으로 인증 실행
+    const ok = await User.setUser(selectedUser, key);
+    if (!ok) return;
+
+    // 성공 시 자리선택 화면으로 이동
+    View.setViewState(ViewState.SELECT);
+  }
+
+  // 문서 로드 시 실행
+  document.addEventListener('DOMContentLoaded', () => {
+    // 초기 화면 세팅
+    View.setViewState(ViewState.INIT);
+
+    // 유저 선택창 초기 세팅
+    const userSelect = document.getElementById('user-select');
+
+    if (!userSelect) showError("dom 로딩 에러");
+
+    Object.entries(Users).forEach(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      userSelect.appendChild(option);
+    });
+
+    // 시작 버튼 클릭 시 실행
+    const startBtn = document.getElementById('startBtn');
+
+    if (!startBtn) showError("dom 로딩 에러");
+
+    startBtn.addEventListener('click', () => {
+      // 누른 순간의 dom을 가져와야 함
+      const userSelect = document.getElementById('user-select');
+      const selectedUser = userSelect ? userSelect.value : '';
+
+      const keyInput = document.getElementById('keyInput');
+      const key = keyInput ? keyInput.value.trim() : '';
+
+      start(selectedUser, key);
+    });
+
+    // 모달
+    document.getElementById('errorCloseBtn')?.addEventListener('click', hideError);
+    document.getElementById('errorModal')?.addEventListener('click', (e) => {
+      if (e.target.id === 'errorModal') hideError();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') hideError();
+    });
+  });
+
+  // 모달
+  const showError = (message) => {
+    const modal = document.getElementById('errorModal');
+    const msg = document.getElementById('errorMessage');
+    if (!modal || !msg) return;
+    msg.textContent = message || '오류가 발생했습니다.';
+    modal.classList.remove('hidden');
+  }
+
+  const hideError = () => {
+    const modal = document.getElementById('errorModal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+  }
+</script>
+
+<body class="w-screen h-screen">
+  <!-- 에러 모달 -->
+  <div id="errorModal" class="hidden fixed inset-0 z-50 bg-black/40 backdrop-blur-sm">
+    <div
+      class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[320px] rounded-lg bg-white p-4 shadow-lg">
+      <div class="mb-3 text-base font-semibold">알림</div>
+      <div id="errorMessage" class="mb-4 text-sm text-gray-700">오류가 발생했습니다.</div>
+      <div class="flex justify-end gap-2">
+        <button id="errorCloseBtn"
+          class="px-3 py-1.5 rounded-md bg-blue-600 text-white text-sm hover:bg-blue-700 active:scale-[0.98]">확인</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 초기 화면 -->
+  <div id="initView" class="w-full h-full">
+    <div class=" w-full h-full flex flex-col justify-around items-center">
+      <header class="text-[80px]">
+        <h1>내 자리는 어디에?</h1>
+      </header>
+
+      <main class="flex flex-col">
+        <div class="w-[250px] h-[60px] text-[20px]">
+          <!-- 동적으로 채워짐 -->
+          <select id="user-select"></select>
+        </div>
+
+        <div class="flex gap-4">
+          <input id="keyInput"
+            class="w-[250px] h-[60px] rounded-[10px] border border-gray-300 px-3 text-[18px] outline-none focus:border-blue-500"
+            placeholder="🗝️키를 입력해주세요" />
+
+          <button id="startBtn"
+            class="cursor-pointer w-[100px] h-[60px] rounded-[10px] text-[20px] bg-blue-600 text-white hover:bg-blue-700 active:scale-[0.98] transition">
+            시작!
+          </button>
+        </div>
+      </main>
+
+      <footer>
+        <p>❄️chan-intership clone coding</p>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 자리 선택 화면 -->
+  <div id="selectView" class="w-full h-full hidden">
+    <div class="w-full h-full p-40 flex items-center justify-center">
+      <!-- 2행 × 3열(Grid). 가운데 열은 복도, 위/아래로 절반 분할하여 4개 구역 + 중앙 복도 -->
+      <div class="grid grid-rows-2 [grid-template-columns:1fr_64px_1fr] gap-4 w-full">
+
+
+        <!-- 안쪽 구역 -->
+        <div class="border rounded-md p-4 flex flex-col gap-4">
+          <div class="text-sm font-semibold text-gray-700">안쪽</div>
+          <div class="grid grid-cols-2 gap-3">
+            <button id="desk5" onclick="question('5')"
+              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">5</button>
+            <button id="desk6" onclick="question('6')"
+              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">6</button>
+            <button id="desk7" onclick="question('7')"
+              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">7</button>
+            <button id="desk8" onclick="question('8')"
+              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">8</button>
+          </div>
+        </div>
+
+        <!-- 가운데: 복도 (세로로 길게, 상/하 모두 관통) -->
+        <div class="row-span-2 flex items-center justify-center">
+          <div class="w-[40px] h-full bg-gray-300 text-center"> 복도 </div>
+        </div>
+
+        <!-- 라운지/공용 공간 -->
+        <div class="border rounded-md p-4 flex flex-col gap-2">
+          <div class="text-sm font-semibold text-gray-700">회의실</div>
+          <div class="text-sm text-gray-500">회의/대기 공간</div>
+        </div>
+
+        <!-- 비밀의 방 -->
+        <div class="border rounded-md p-4 flex flex-col gap-2">
+          <div class="text-sm font-semibold text-gray-700">비밀의 방</div>
+          <div class="text-sm text-gray-500">입장 제한 구역</div>
+        </div>
+
+        <!-- 사무실 구역 -->
+        <div class="border rounded-md p-4 flex flex-col gap-4">
+          <div class="text-sm font-semibold text-gray-700">사무실</div>
+          <div class="grid grid-cols-2 gap-3">
+            <button id="desk1" onclick="question('1')"
+              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">1</button>
+            <button id="desk2" onclick="question('2')"
+              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">2</button>
+            <button id="desk3" onclick="question('3')"
+              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">3</button>
+            <button id="desk4" onclick="question('4')"
+              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">4</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 퀴즈 화면 -->
+  <div id="questionView" class="w-full h-full hidden">
+
+  </div>
+</body>
+
+</html>
