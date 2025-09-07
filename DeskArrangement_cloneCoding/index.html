@@ -11,15 +11,20 @@
   <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 </head>
 <script>
+  (() => {
+    'use strict';
   // API 서버 URL
   const API_BASE = 'http://localhost:3000';
   
-  // 전역 변수
+  // 변수
   let socket = null;
   let authToken = null;
+  let tokenExp = null;       // JWT 만료 시각(ms)
+  let reauthTimer = null;    // 만료 사전 알림 타이머
   let otherUsers = new Map(); // 다른 유저들의 마우스 위치
   let currentSeats = {}; // 자리 상태
   let currentQuestion = null; // 현재 풀고 있는 문제
+  let mouseHandlerRef = null; // 마우스 이벤트 핸들러 참조(해제용)
   
   /* 화면 분기 로직 */
   // 화면을 안 보이게 세팅하는 함수
@@ -107,7 +112,22 @@
   })(); // 즉시 실행
   
   // 초기 화면으로 돌아가는 로직 (resetToInit)
-  const resetToInit = () => {
+  const resetToInit = async () => {
+    // 현재 문제 풀이 중이면 서버에 중단 통지
+    await quitIfSolving();
+    
+    // 만료 알림 타이머 해제
+    if (reauthTimer) {
+      clearTimeout(reauthTimer);
+      reauthTimer = null;
+    }
+
+    // 마우스 이벤트 리스너 해제
+    if (mouseHandlerRef) {
+      document.removeEventListener('mousemove', mouseHandlerRef);
+      mouseHandlerRef = null;
+    }
+
     // 소켓 연결 끊기
     if (socket) {
       socket.disconnect();
@@ -123,6 +143,7 @@
     // 상태 초기화
     User.setNull();
     authToken = null;
+    tokenExp = null;
     currentQuestion = null;
     
     // 초기 화면으로
@@ -151,9 +172,20 @@
         return false;
       }
 
-      // 2. 토큰 저장
+      // 2. 토큰/만료 저장
       authToken = data.token;
+      tokenExp = data.exp || null;
       User.setUser(username);
+
+      // 2-1. 만료 60초 전 알림 및 초기화
+      if (reauthTimer) clearTimeout(reauthTimer);
+      if (tokenExp) {
+        const warnIn = Math.max(0, tokenExp - Date.now() - 60_000);
+        reauthTimer = setTimeout(() => {
+          showError('세션이 곧 만료됩니다. 다시 로그인해주세요.');
+          resetToInit();
+        }, warnIn);
+      }
 
       // 3. 소켓 연결
       connectSocket(username);
@@ -182,6 +214,15 @@
       // 자리 선택 화면으로 이동
       View.setViewState(ViewState.SELECT);
       
+      // 초기 좌석 상태 로드
+      fetch(`${API_BASE}/api/seats`)
+        .then(r => r.ok ? r.json() : Promise.reject())
+        .then(({ seats }) => {
+          currentSeats = seats || {};
+          updateSeatsDisplay();
+        })
+        .catch(() => { /* 무시: 소켓 seats:update 로 보정됨 */ });
+
       // 마우스 추적 시작
       startMouseTracking();
     });
@@ -226,6 +267,20 @@
     socket.on('seats:update', ({ seats }) => {
       currentSeats = seats;
       updateSeatsDisplay();
+
+      // 모달 자동 정리: 좌석 소유자 발생 또는 내가 더 이상 풀이자가 아닐 때
+      if (currentQuestion) {
+        const me = User.getUser();
+        const seat = seats[currentQuestion.seatNumber];
+        if (seat) {
+          const owned = !!seat.owner;
+          const iAmSolving = Array.isArray(seat.solving) && seat.solving.includes(me);
+          if (owned || !iAmSolving) {
+            showError(owned ? '다른 사용자가 해당 자리를 획득했습니다.' : '다른 사용자가 문제를 풀었습니다.');
+            closeQuestionModal(); // 내부에서 quitIfSolving() 실행됨
+          }
+        }
+      }
     });
 
     // 정답 맞춘 유저 알림
@@ -298,7 +353,7 @@
     document.body.appendChild(myMouse);
     
     // 마우스 이벤트 리스너
-    const mouseHandler = (e) => {
+    mouseHandlerRef = (e) => {
       // 내 마우스 위치 업데이트 (부드러운 애니메이션)
       myMouse.style.transform = `translate(${e.clientX - 10}px, ${e.clientY - 10}px)`;
       myMouse.style.transition = 'transform 0.08s ease-out';
@@ -316,7 +371,7 @@
       socket.emit('mouse:move', { x, y });
     };
     
-    document.addEventListener('mousemove', mouseHandler);
+    document.addEventListener('mousemove', mouseHandlerRef);
   }
 
   // 랜덤 색상 생성 함수
@@ -400,14 +455,19 @@
           <div class="text-lg font-bold">${seatNum}</div>
           <div class="text-xs text-red-600 mt-1 font-medium">${Users[seat.owner] || seat.owner}</div>
         `;
-      } else if (seat.solving) {
-        // 누군가 풀이 중인 자리
+        deskEl.toggleAttribute('disabled', true);
+        deskEl.classList.add('cursor-not-allowed', 'opacity-80');
+      } else if (Array.isArray(seat.solving) && seat.solving.length > 0) {
+        // 누군가(여러 명) 풀이 중인 자리
+        const count = seat.solving.length;
         deskEl.classList.add('bg-gradient-to-br', 'from-yellow-100', 'to-yellow-200', 'border-yellow-400', 'animate-pulse');
         deskEl.innerHTML = `
           <div class="text-2xl">⏳</div>
           <div class="text-lg font-bold">${seatNum}</div>
-          <div class="text-xs text-yellow-700 mt-1 font-medium">풀이중...</div>
+          <div class="text-xs text-yellow-700 mt-1 font-medium">풀이중${count > 1 ? `(${count})` : ''}</div>
         `;
+        deskEl.toggleAttribute('disabled', true);
+        deskEl.classList.add('cursor-not-allowed');
       } else {
         // 빈 자리
         deskEl.classList.add('bg-gradient-to-br', 'from-green-50', 'to-green-100', 'border-green-400', 'hover:from-green-100', 'hover:to-green-200', 'hover:scale-105');
@@ -416,6 +476,8 @@
           <div class="text-lg font-bold">${seatNum}</div>
           <div class="text-xs text-green-600 mt-1 font-medium">빈 자리</div>
         `;
+        deskEl.toggleAttribute('disabled', false);
+        deskEl.classList.remove('cursor-not-allowed', 'opacity-80');
       }
     });
   }
@@ -432,7 +494,7 @@
       const response = await fetch(`${API_BASE}/api/question`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, seatNumber })
+        body: JSON.stringify({ token: authToken, seatNumber })
       });
 
       const data = await response.json();
@@ -455,6 +517,22 @@
       showError('서버 연결 실패: ' + error.message);
     }
   }
+  // 문제 풀이 중단(서버 통지) - 모달 닫기/페이지 이동/로그아웃 공용
+  const quitIfSolving = async () => {
+    if (!currentQuestion || !authToken) return;
+    try {
+      await fetch(`${API_BASE}/api/question/quit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: authToken, seatNumber: currentQuestion.seatNumber })
+      });
+    } catch (e) {
+      // 네트워크 오류시 무시
+    } finally {
+      currentQuestion = null;
+    }
+  };
+
 
   // 문제 모달 표시
   const showQuestionModal = (question, seatNumber) => {
@@ -469,17 +547,16 @@
   }
 
   // 문제 모달 닫기
-  const closeQuestionModal = () => {
+  const closeQuestionModal = async () => {
+    await quitIfSolving();
     const modal = document.getElementById('questionModal');
     modal.classList.add('hidden');
-    currentQuestion = null;
   }
 
   // 정답 제출
   const submitAnswer = async () => {
     if (!currentQuestion) return;
     
-    const username = User.getUser();
     const answerInput = document.getElementById('answerInput');
     const answer = answerInput.value.trim();
     
@@ -493,7 +570,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          username, 
+          token: authToken,
           seatNumber: currentQuestion.seatNumber, 
           answer 
         })
@@ -574,10 +651,20 @@
     }
   }
 
-  // 페이지 종료/새로고침 시 소켓 정리
+  // 페이지 종료/새로고침 시 풀이 중단 비콘 + 소켓 정리
   window.addEventListener('beforeunload', () => {
+    if (currentQuestion && authToken) {
+      const payload = JSON.stringify({ token: authToken, seatNumber: currentQuestion.seatNumber });
+      const blob = new Blob([payload], { type: 'application/json' });
+      navigator.sendBeacon(`${API_BASE}/api/question/quit`, blob);
+      currentQuestion = null;
+    }
     if (socket) {
       socket.disconnect();
+    }
+    if (mouseHandlerRef) {
+      document.removeEventListener('mousemove', mouseHandlerRef);
+      mouseHandlerRef = null;
     }
   });
 
@@ -628,6 +715,17 @@
       }
     });
 
+    // 자리 버튼 클릭 핸들러 바인딩 (inline onclick 제거 대응)
+    for (let i = 1; i <= 8; i++) {
+      const el = document.getElementById(`desk${i}`);
+      el?.addEventListener('click', () => question(i));
+    }
+
+    // 로그아웃 버튼(내부 함수로만 접근)
+    document.getElementById('logoutBtn')?.addEventListener('click', () => {
+      resetToInit();
+    });
+
     // 모달 이벤트
     document.getElementById('errorCloseBtn')?.addEventListener('click', hideError);
     document.getElementById('errorModal')?.addEventListener('click', (e) => {
@@ -665,6 +763,9 @@
     if (!modal) return;
     modal.classList.add('hidden');
   }
+    // 외부 노출 최소화: start만 공개
+    window.APP = { start };
+  })();
 </script>
 
 <body class="w-screen h-screen">
@@ -742,7 +843,7 @@
         </h2>
         <!-- 로그아웃 버튼 -->
         <div class="flex-1 flex justify-end">
-          <button onclick="resetToInit()" 
+          <button id="logoutBtn"
             class="px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-full hover:from-red-600 hover:to-red-700 shadow-lg transition-all hover:scale-105">
             🚪 로그아웃
           </button>
@@ -759,13 +860,13 @@
         <div class="bg-white/80 backdrop-blur-sm border-2 border-purple-200 rounded-2xl p-6 flex flex-col gap-4 shadow-xl hover:shadow-2xl transition-shadow">
           <div class="text-lg font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">🌸 안쪽 공간</div>
           <div class="grid grid-cols-2 gap-4">
-            <button id="desk5" onclick="question('5')"
+            <button id="desk5"
               class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">5</button>
-            <button id="desk6" onclick="question('6')"
+            <button id="desk6"
               class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">6</button>
-            <button id="desk7" onclick="question('7')"
+            <button id="desk7"
               class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">7</button>
-            <button id="desk8" onclick="question('8')"
+            <button id="desk8"
               class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">8</button>
           </div>
         </div>
@@ -793,13 +894,13 @@
         <div class="bg-white/80 backdrop-blur-sm border-2 border-blue-200 rounded-2xl p-6 flex flex-col gap-4 shadow-xl hover:shadow-2xl transition-shadow">
           <div class="text-lg font-bold bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">💼 사무실</div>
           <div class="grid grid-cols-2 gap-4">
-            <button id="desk1" onclick="question('1')"
+            <button id="desk1"
               class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">1</button>
-            <button id="desk2" onclick="question('2')"
+            <button id="desk2"
               class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">2</button>
-            <button id="desk3" onclick="question('3')"
+            <button id="desk3"
               class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">3</button>
-            <button id="desk4" onclick="question('4')"
+            <button id="desk4"
               class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">4</button>
           </div>
         </div>

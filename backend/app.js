@@ -3,6 +3,9 @@ const cors = require('cors');
 const crypto = require('crypto');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-jwt-secret-change-me';
+const TOKEN_TTL_SECONDS = Number(process.env.TOKEN_TTL_SECONDS || 3600);
 
 const app = express();
 const httpServer = createServer(app);
@@ -18,7 +21,7 @@ const io = new Server(httpServer, {
 });
 
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:5500', 'https://chan.gling.co.kr'],
+  origin: ['http://localhost:3000', 'http://localhost:5500', 'http://127.0.0.1:5500', 'https://chan.gling.co.kr'],
 }));
 
 app.use(express.json());
@@ -29,14 +32,14 @@ const port = 3000;
 const connectedUsers = new Map(); // socketId -> { username, mouseX, mouseY }
 const sessions = new Map(); // username -> { token, socketId }
 const seats = {
-  1: { owner: null, solving: null },
-  2: { owner: null, solving: null },
-  3: { owner: null, solving: null },
-  4: { owner: null, solving: null },
-  5: { owner: null, solving: null },
-  6: { owner: null, solving: null },
-  7: { owner: null, solving: null },
-  8: { owner: null, solving: null }
+  1: { owner: null, solving: [] },
+  2: { owner: null, solving: [] },
+  3: { owner: null, solving: [] },
+  4: { owner: null, solving: [] },
+  5: { owner: null, solving: [] },
+  6: { owner: null, solving: [] },
+  7: { owner: null, solving: [] },
+  8: { owner: null, solving: [] }
 };
 
 // 문제 데이터
@@ -61,9 +64,29 @@ const hash = async (text) => {
   return hasher.digest('hex');
 };
 
-// 토큰 생성
-const generateToken = () => {
-  return crypto.randomBytes(32).toString('hex');
+// 토큰 생성(JWT, TTL 적용)
+const generateToken = (username) => {
+  return jwt.sign({ username }, JWT_SECRET, { expiresIn: TOKEN_TTL_SECONDS });
+};
+
+// 공통 인증 미들웨어: 바디에서 token(필수), username(선택)을 받아 검증
+function requireAuth(req, res, next) {
+  try {
+    const { token, username } = req.body || {};
+    if (!token) return res.status(401).json({ error: '토큰이 필요합니다' });
+    const decoded = jwt.verify(token, JWT_SECRET); // exp 자동 검증
+    if (username && decoded.username !== username) {
+      return res.status(401).json({ error: '토큰의 사용자와 요청 사용자가 다릅니다' });
+    }
+    const sess = sessions.get(decoded.username);
+    if (!sess || sess.token !== token) {
+      return res.status(401).json({ error: '세션이 유효하지 않습니다' });
+    }
+    req.user = { username: decoded.username };
+    return next();
+  } catch (e) {
+    return res.status(401).json({ error: '토큰이 유효하지 않습니다' });
+  }
 };
 
 // test api
@@ -93,15 +116,22 @@ app.post('/api/auth/verify', async (req, res) => {
     return res.status(401).json({ error: '키가 올바르지 않습니다' });
   }
   
-  // 이미 연결된 유저인지 확인
-  if (sessions.has(username)) {
-    return res.status(409).json({ error: '이미 접속 중인 유저입니다' });
+  // 이미 연결된 유저인지 확인(만료된 세션은 정리)
+  const existing = sessions.get(username);
+  if (existing) {
+    if (existing.exp && existing.exp > Date.now()) {
+      return res.status(409).json({ error: '이미 접속 중인 유저입니다' });
+    } else {
+      sessions.delete(username);
+    }
   }
+
+  const token = generateToken(username);
+  const decoded = jwt.decode(token);
+  const expMs = decoded && decoded.exp ? decoded.exp * 1000 : Date.now() + TOKEN_TTL_SECONDS * 1000;
+  sessions.set(username, { token, socketId: null, exp: expMs });
   
-  const token = generateToken();
-  sessions.set(username, { token, socketId: null });
-  
-  res.json({ success: true, token, username });
+  res.json({ success: true, token, username, exp: expMs });
 });
 
 // 자리 목록 조회 API
@@ -110,11 +140,12 @@ app.get('/api/seats', (req, res) => {
 });
 
 // 문제 요청 API
-app.post('/api/question', (req, res) => {
-  const { username, seatNumber } = req.body;
+app.post('/api/question', requireAuth, (req, res) => {
+  const { seatNumber } = req.body;
+  const username = req.user.username;
   
-  if (!username || !seatNumber) {
-    return res.status(400).json({ error: '유저명과 자리 번호를 입력해주세요' });
+  if (!seatNumber) {
+    return res.status(400).json({ error: '자리 번호를 입력해주세요' });
   }
   
   const seat = seats[seatNumber];
@@ -126,8 +157,11 @@ app.post('/api/question', (req, res) => {
     return res.status(409).json({ error: '이미 선점된 자리입니다', owner: seat.owner });
   }
   
-  // 문제 풀이 중으로 표시
-  seat.solving = username;
+  // 문제 풀이 중으로 표시(중복 허용: 배열에 추가)
+  if (!Array.isArray(seat.solving)) seat.solving = [];
+  if (!seat.solving.includes(username)) {
+    seat.solving.push(username);
+  }
   
   const question = questions[seatNumber];
   res.json({ 
@@ -140,10 +174,11 @@ app.post('/api/question', (req, res) => {
 });
 
 // 정답 제출 API
-app.post('/api/answer', (req, res) => {
-  const { username, seatNumber, answer } = req.body;
+app.post('/api/answer', requireAuth, (req, res) => {
+  const { seatNumber, answer } = req.body;
+  const username = req.user.username;
   
-  if (!username || !seatNumber || !answer) {
+  if (!seatNumber || !answer) {
     return res.status(400).json({ error: '필수 정보가 누락되었습니다' });
   }
   
@@ -158,9 +193,9 @@ app.post('/api/answer', (req, res) => {
   const isCorrect = answer.trim().toLowerCase() === question.answer.toLowerCase();
   
   if (isCorrect) {
-    // 자리 소유자 설정
+    // 자리 소유자 설정(정답자 소유) 및 현재 풀이자 목록 초기화
     seat.owner = username;
-    seat.solving = null;
+    seat.solving = [];
     
     // 모든 유저에게 성공 알림
     io.emit('answer:correct', { username, seatNumber });
@@ -168,12 +203,38 @@ app.post('/api/answer', (req, res) => {
     
     res.json({ success: true, message: '정답입니다!' });
   } else {
-    // 틀렸을 경우 풀이 중 상태 해제
-    seat.solving = null;
+    // 틀렸을 경우 해당 사용자만 풀이자 목록에서 제거
+    if (Array.isArray(seat.solving)) {
+      seat.solving = seat.solving.filter(u => u !== username);
+    }
     io.emit('seats:update', { seats });
     
     res.status(400).json({ success: false, message: '틀렸습니다. 다시 시도해주세요.' });
   }
+});
+
+// 문제 풀이 중단(자발적 종료) API
+app.post('/api/question/quit', requireAuth, (req, res) => {
+  const { seatNumber } = req.body;
+  const username = req.user.username;
+
+  if (!seatNumber) {
+    return res.status(400).json({ error: '자리 번호를 입력해주세요' });
+  }
+
+  const seat = seats[seatNumber];
+  if (!seat) {
+    return res.status(404).json({ error: '존재하지 않는 자리입니다' });
+  }
+
+  if (Array.isArray(seat.solving)) {
+    const before = seat.solving.length;
+    seat.solving = seat.solving.filter(u => u !== username);
+    if (seat.solving.length !== before) {
+      io.emit('seats:update', { seats });
+    }
+  }
+  return res.json({ success: true });
 });
 
 // 웹소켓 연결 처리
@@ -182,44 +243,49 @@ io.on('connection', (socket) => {
   
   // 유저 인증 및 등록
   socket.on('user:auth', ({ username, token }) => {
-    const session = sessions.get(username);
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      if (decoded.username !== username) throw new Error('username mismatch');
+      const session = sessions.get(username);
+      if (!session || session.token !== token || (session.exp && session.exp < Date.now())) {
+        throw new Error('invalid session');
+      }
     
-    if (!session || session.token !== token) {
+      // 이미 다른 소켓이 연결되어 있으면 끊기
+      if (session.socketId && session.socketId !== socket.id) {
+        const oldSocket = io.sockets.sockets.get(session.socketId);
+        if (oldSocket) {
+          oldSocket.emit('auth:duplicate', { error: '다른 곳에서 접속했습니다' });
+          oldSocket.disconnect();
+        }
+      }
+      
+      // 새 소켓 연결 등록
+      session.socketId = socket.id;
+      connectedUsers.set(socket.id, { username, mouseX: 0, mouseY: 0 });
+      
+      // 현재 연결된 모든 유저 정보 전송
+      const allUsers = Array.from(connectedUsers.entries()).map(([id, data]) => ({
+        socketId: id,
+        ...data
+      }));
+      
+      socket.emit('auth:success', { username });
+      socket.emit('users:list', allUsers);
+      socket.emit('seats:update', { seats });
+      
+      // 다른 유저들에게 새 유저 알림
+      socket.broadcast.emit('user:connected', { 
+        socketId: socket.id,
+        username,
+        mouseX: 0,
+        mouseY: 0
+      });
+    } catch (e) {
       socket.emit('auth:failed', { error: '인증 실패' });
       socket.disconnect();
       return;
     }
-    
-    // 이미 다른 소켓이 연결되어 있으면 끊기
-    if (session.socketId && session.socketId !== socket.id) {
-      const oldSocket = io.sockets.sockets.get(session.socketId);
-      if (oldSocket) {
-        oldSocket.emit('auth:duplicate', { error: '다른 곳에서 접속했습니다' });
-        oldSocket.disconnect();
-      }
-    }
-    
-    // 새 소켓 연결 등록
-    session.socketId = socket.id;
-    connectedUsers.set(socket.id, { username, mouseX: 0, mouseY: 0 });
-    
-    // 현재 연결된 모든 유저 정보 전송
-    const allUsers = Array.from(connectedUsers.entries()).map(([id, data]) => ({
-      socketId: id,
-      ...data
-    }));
-    
-    socket.emit('auth:success', { username });
-    socket.emit('users:list', allUsers);
-    socket.emit('seats:update', { seats });
-    
-    // 다른 유저들에게 새 유저 알림
-    socket.broadcast.emit('user:connected', { 
-      socketId: socket.id,
-      username,
-      mouseX: 0,
-      mouseY: 0
-    });
   });
   
   // 마우스 위치 업데이트
@@ -255,10 +321,10 @@ io.on('connection', (socket) => {
         }
       }
       
-      // 풀이 중인 자리가 있으면 해제
+      // 풀이 중인 자리가 있으면 해당 사용자만 제거
       Object.values(seats).forEach(seat => {
-        if (seat.solving === user.username) {
-          seat.solving = null;
+        if (Array.isArray(seat.solving)) {
+          seat.solving = seat.solving.filter(u => u !== user.username);
         }
       });
       
@@ -315,6 +381,20 @@ app.use((err, req, res, next) => {
     message: err.message,
   });
 });
+
+// 만료된 세션 정리(1분 주기)
+setInterval(() => {
+  const now = Date.now();
+  for (const [username, s] of sessions.entries()) {
+    if (s.exp && s.exp < now) {
+      if (s.socketId) {
+        const sk = io.sockets.sockets.get(s.socketId);
+        if (sk) sk.disconnect(true);
+      }
+      sessions.delete(username);
+    }
+  }
+}, 60_000);
 
 // HTTP 서버와 Socket.IO 함께 시작
 httpServer.listen(port, () => {
