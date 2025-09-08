@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
+const path = require('path');
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-jwt-secret-change-me';
 const TOKEN_TTL_SECONDS = Number(process.env.TOKEN_TTL_SECONDS || 3600);
 
@@ -363,6 +364,22 @@ app.get('/random', (req, res) => {
 
   const value = Math.floor(Math.random() * (max - min + 1)) + min;
   res.json({ min, max, value });
+});
+
+// 정적 파일 서빙 (/desk)
+const DESK_STATIC_DIR = path.resolve(__dirname, './static'); 
+
+// /desk 및 하위 정적 자원 제공 (index.html 자동 서빙)
+app.use('/desk', express.static(DESK_STATIC_DIR, {
+  index: 'index.html',
+  maxAge: '30d',
+  immutable: true,
+}));
+
+// SPA 라우팅 지원: /desk/* 경로는 항상 index.html 반환
+// (path-to-regexp v6 호환: 정규식 사용)
+app.get(/^\/desk(?:\/.*)?$/, (req, res) => {
+  res.sendFile(path.join(DESK_STATIC_DIR, 'index.html'));
 });
 
 // 404 처리 미들웨어
