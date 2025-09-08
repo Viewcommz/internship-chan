@@ -373,7 +373,7 @@
     });
   }
 
-  // 인증 성공 후 초기화 콜백
+  // 인증 성공 후 초기화 
   const handleAuthSuccess = ({ username }) => {
     // 자리 선택 화면으로 이동
     View.setViewState(ViewState.SELECT);
@@ -402,8 +402,8 @@
       });
       if (!ok) return false;
 
-      // 소켓 연결 + 인증 성공 콜백 전달
-      Realtime.connect(username, { onAuthenticated: handleAuthSuccess });
+      // 소켓 연결
+      Realtime.connect(username);
 
       return true;
     } catch (error) {
@@ -415,7 +415,7 @@
   /* 실시간(소켓) 모듈 */
   const Realtime = (() => {
     let socket = null; 
-    const connect = (username, { onAuthenticated = handleAuthSuccess } = {}) => {
+    const connect = (username) => {
       socket = io(API_BASE);
 
       socket.on('connect', () => {
@@ -423,9 +423,7 @@
       });
 
       socket.on('auth:success', (payload) => {
-        if (typeof onAuthenticated === 'function') {
-          onAuthenticated(payload);
-        }
+        handleAuthSuccess(payload);
       });
 
       socket.on('auth:failed', ({ error }) => { showError(error); resetToInit(); });
