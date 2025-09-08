@@ -366,6 +366,31 @@ app.get('/random', (req, res) => {
   res.json({ min, max, value });
 });
 
+// 서버 상태 초기화 API (오너만 초기화)
+// - POST /api/seats/reset-owner
+// - body: { seatNumber?: number }  // 없으면 전체, 있으면 해당 좌석만 오너 초기화
+app.post('/api/seats/reset-owner', (req, res) => {
+  const { seatNumber } = req.body || {};
+
+  // 단일 좌석만 초기화
+  if (seatNumber !== undefined && seatNumber !== null) {
+    const seat = seats[seatNumber];
+    if (!seat) {
+      return res.status(404).json({ error: '존재하지 않는 자리입니다' });
+    }
+    seat.owner = null; // solving 배열은 그대로 유지
+    io.emit('seats:update', { seats });
+    return res.json({ success: true, scope: 'single', seatNumber });
+  }
+
+  // 전체 좌석 오너 초기화
+  Object.keys(seats).forEach((k) => {
+    seats[k].owner = null; // solving 배열은 그대로 유지
+  });
+  io.emit('seats:update', { seats });
+  return res.json({ success: true, scope: 'all' });
+});
+
 // 정적 파일 서빙 (/desk)
 const DESK_STATIC_DIR = path.resolve(__dirname, './static'); 
 
