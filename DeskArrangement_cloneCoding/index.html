@@ -15,8 +15,11 @@
     'use strict';
   // API 서버 URL
   const API_BASE = 'http://localhost:3000';
-    
+  
+  /////////////////  
   /* 화면 분기 로직 */
+  ////////////////
+  
   // 화면을 안 보이게 세팅하는 함수
   const setHiddenView = (targetId) => {
     const el = document.getElementById(targetId);
@@ -64,6 +67,10 @@
       setViewState
     });
   })(); // 즉시 실행
+
+  /////////////////  
+  /* 유저 인증 로직 */
+  ////////////////
 
   /* 유저 선택 로직 */
   const Users = {
@@ -164,142 +171,12 @@
       clearTimer
     });
   })(); // 즉시 실행
+
+  /////////////////////////
+  /* 마우스 로직 (나 + 타인) */
+  ////////////////////////
   
-  // 자리배치 로직
-  let otherUsers = new Map(); // 다른 유저들의 마우스 위치
-
-  /* 좌석 상태 래퍼 */
-  const Seats = (() => {
-    let current = {};
-    const get = () => current;
-    const set = (seats) => { current = seats || {}; };
-    return Object.freeze({ get, set });
-  })(); // 즉시 실행
-  
-  // 초기 화면으로 돌아가는 로직 (resetToInit)
-  const resetToInit = async () => {
-    // 현재 문제 풀이 중이면 서버에 중단 통지
-    if (typeof Question !== 'undefined') {
-      await Question.quit();
-    }
-
-    // 마우스 정리
-    if (typeof Mouse !== 'undefined') {
-      Mouse.stop();
-    }
-
-    // 소켓 해제
-    if (typeof Realtime !== 'undefined') {
-      Realtime.disconnect();
-    }
-
-    // 인증/유저 초기화
-    if (typeof Auth !== 'undefined') Auth.reset();
-    User.setNull();
-
-    // 다른 사용자 커서 정리
-    document.querySelectorAll('.other-mouse').forEach(el => el.remove());
-    otherUsers.clear();
-
-    // 초기 화면으로
-    View.setViewState(ViewState.INIT);
-  }
-
-  // 서버 인증 및 소켓 연결
-  const authenticateAndConnect = async (username, key) => {
-    try {
-      const ok = await Auth.login(username, key, {
-        onExpiring: () => {
-          showError('세션이 곧 만료됩니다. 다시 로그인해주세요.');
-          resetToInit();
-        }
-      });
-      if (!ok) return false;
-
-      // 소켓 연결
-      Realtime.connect(username);
-      return true;
-    } catch (error) {
-      showError('서버 연결 실패: ' + error.message);
-      return false;
-    }
-  }
-
-  /* 실시간(소켓) 모듈 */
-  const Realtime = (() => {
-    let socket = null; 
-    const connect = (username) => {
-      socket = io(API_BASE);
-
-      socket.on('connect', () => {
-        socket.emit('user:auth', { username, token: Auth.getToken() });
-      });
-
-      socket.on('auth:success', ({ username }) => {
-        View.setViewState(ViewState.SELECT);
-
-        // 초기 좌석 상태 로드
-        fetch(`${API_BASE}/api/seats`)
-          .then(r => r.ok ? r.json() : Promise.reject())
-          .then(({ seats }) => {
-            Seats.set(seats);
-            updateSeatsDisplay();
-          })
-          .catch(() => {});
-
-        // 마우스 추적 시작
-        Mouse.start();
-      });
-
-      socket.on('auth:failed', ({ error }) => { showError(error); resetToInit(); });
-      socket.on('auth:duplicate', ({ error }) => { showError(error); resetToInit(); });
-
-      socket.on('users:list', (users) => {
-        users.forEach(user => {
-          if (user.username !== username) {
-            updateOtherUserMouse(user.socketId, user.username, user.mouseX, user.mouseY);
-          }
-        });
-      });
-
-      socket.on('user:connected', (user) => {
-        updateOtherUserMouse(user.socketId, user.username, user.mouseX, user.mouseY);
-      });
-
-      socket.on('user:disconnected', ({ socketId }) => {
-        removeOtherUserMouse(socketId);
-      });
-
-      socket.on('mouse:update', ({ socketId, username, x, y }) => {
-        updateOtherUserMouse(socketId, username, x, y);
-      });
-
-      socket.on('seats:update', ({ seats }) => {
-        Seats.set(seats);
-        updateSeatsDisplay();
-        Question.onSeatsUpdate(seats);
-      });
-
-      socket.on('answer:correct', ({ username, seatNumber }) => {
-        showFireworks(username, seatNumber);
-      });
-
-      socket.on('disconnect', () => { console.log('소켓 연결 끊김'); });
-    };
-
-    const disconnect = () => {
-      if (socket) {
-        socket.disconnect();
-        socket = null;
-      }
-    };
-
-    const getSocket = () => socket;
-
-    return Object.freeze({ connect, disconnect, getSocket });
-  })(); // 즉시 실행
-
-  /* 마우스 추적 로직 */
+  /* 내 마우스 관련 로직 */
   const Mouse = (() => {
     let lastSent = 0;
     let handler = null;
@@ -333,6 +210,7 @@
       return el;
     };
 
+    // 내 마우스 시작 함수
     const start = () => {
       ensureStyle();
       document.getElementById('my-mouse')?.remove();
@@ -387,6 +265,9 @@
     ];
     return colors[Math.floor(Math.random() * colors.length)];
   }
+  
+  /* 다른 사람 마우스 로직 */
+  let otherUsers = new Map(); // 다른 유저들의 마우스 위치
 
   // 다른 유저 마우스 업데이트
   const updateOtherUserMouse = (socketId, username, x, y) => {
@@ -434,7 +315,19 @@
     otherUsers.delete(socketId);
   }
 
-  // 자리 상태 표시 업데이트
+  /////////////////  
+  /* 자리 배치 로직 */
+  ////////////////
+
+  /* 좌석 상태 래퍼 */
+  const Seats = (() => {
+    let current = {};
+    const get = () => current;
+    const set = (seats) => { current = seats || {}; };
+    return Object.freeze({ get, set });
+  })(); // 즉시 실행
+  
+  // 자리 상태 업데이트
   const updateSeatsDisplay = () => {
     Object.entries(Seats.get()).forEach(([seatNum, seat]) => {
       const deskEl = document.getElementById(`desk${seatNum}`);
@@ -480,7 +373,112 @@
     });
   }
 
+  // 인증 성공 후 초기화 콜백
+  const handleAuthSuccess = ({ username }) => {
+    // 자리 선택 화면으로 이동
+    View.setViewState(ViewState.SELECT);
+
+    // 초기 좌석 상태 로드
+    fetch(`${API_BASE}/api/seats`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(({ seats }) => {
+        Seats.set(seats);
+        updateSeatsDisplay();
+      })
+      .catch(() => { /* 소켓 seats:update로 보정됨 */ });
+
+    // 마우스 추적 시작
+    Mouse.start();
+  };
+
+  // 서버 인증 및 소켓 연결
+  const authenticateAndConnect = async (username, key) => {
+    try {
+      const ok = await Auth.login(username, key, {
+        onExpiring: () => {
+          showError('세션이 곧 만료됩니다. 다시 로그인해주세요.');
+          resetToInit();
+        }
+      });
+      if (!ok) return false;
+
+      // 소켓 연결 + 인증 성공 콜백 전달
+      Realtime.connect(username, { onAuthenticated: handleAuthSuccess });
+
+      return true;
+    } catch (error) {
+      showError('서버 연결 실패: ' + error.message);
+      return false;
+    }
+  }
+
+  /* 실시간(소켓) 모듈 */
+  const Realtime = (() => {
+    let socket = null; 
+    const connect = (username, { onAuthenticated = handleAuthSuccess } = {}) => {
+      socket = io(API_BASE);
+
+      socket.on('connect', () => {
+        socket.emit('user:auth', { username, token: Auth.getToken() });
+      });
+
+      socket.on('auth:success', (payload) => {
+        if (typeof onAuthenticated === 'function') {
+          onAuthenticated(payload);
+        }
+      });
+
+      socket.on('auth:failed', ({ error }) => { showError(error); resetToInit(); });
+      socket.on('auth:duplicate', ({ error }) => { showError(error); resetToInit(); });
+
+      socket.on('users:list', (users) => {
+        users.forEach(user => {
+          if (user.username !== username) {
+            updateOtherUserMouse(user.socketId, user.username, user.mouseX, user.mouseY);
+          }
+        });
+      });
+
+      socket.on('user:connected', (user) => {
+        updateOtherUserMouse(user.socketId, user.username, user.mouseX, user.mouseY);
+      });
+
+      socket.on('user:disconnected', ({ socketId }) => {
+        removeOtherUserMouse(socketId);
+      });
+
+      socket.on('mouse:update', ({ socketId, username, x, y }) => {
+        updateOtherUserMouse(socketId, username, x, y);
+      });
+
+      socket.on('seats:update', ({ seats }) => {
+        Seats.set(seats);
+        updateSeatsDisplay();
+        Question.onSeatsUpdate(seats);
+      });
+
+      socket.on('answer:correct', ({ username, seatNumber }) => {
+        showFireworks(username, seatNumber);
+      });
+
+      socket.on('disconnect', () => { console.log('소켓 연결 끊김'); });
+    };
+
+    const disconnect = () => {
+      if (socket) {
+        socket.disconnect();
+        socket = null;
+      }
+    };
+
+    const getSocket = () => socket;
+
+    return Object.freeze({ connect, disconnect, getSocket });
+  })(); // 즉시 실행
+
+  /////////////////
   /* 문제/정답 로직 */
+  ////////////////
   const Question = (() => {
     let current = null; // { seatNumber, question }
     let suppressAutoAlert = false; // 내 동작으로 인한 seats:update는 알림 숨김
@@ -488,6 +486,7 @@
     const isActive = () => !!current;
     const currentSeat = () => (current ? current.seatNumber : null);
 
+    // 문제 모달
     const showModal = (question) => {
       const modal = document.getElementById('questionModal');
       const questionText = document.getElementById('questionText');
@@ -556,6 +555,7 @@
       hideModal();
     };
 
+    // 제출
     const submit = async () => {
       if (!current) return;
       const answerInput = document.getElementById('answerInput');
@@ -645,6 +645,10 @@
     });
   })(); // 즉시 실행
 
+  ///////////////////////////
+  /* 전역 모달 및 불꽃 놀이 효과 */
+  ///////////////////////////
+
   // 불꽃놀이 효과
   const showFireworks = (username, seatNumber) => {
     const message = `🎉 ${Users[username] || username}님이 ${seatNumber}번 자리를 획득했습니다! 🎉`;
@@ -685,44 +689,7 @@
     setTimeout(() => successModal.remove(), 3000);
   }
 
-  // 시작 함수 수정
-  const start = async (selectedUser, key) => {
-    if (!selectedUser) {
-      showError('닉네임을 선택해주세요');
-      return;
-    }
-    if (!key) {
-      showError('키를 입력해주세요');
-      return;
-    }
-
-    // 서버 인증 및 연결
-    const success = await authenticateAndConnect(selectedUser, key);
-    if (!success) {
-      return;
-    }
-  }
-
-  // 페이지 종료/새로고침 시 풀이 중단 비콘 + 소켓 정리
-  window.addEventListener('beforeunload', () => {
-    if (Question.isActive() && Auth.getToken()) {
-      const payload = JSON.stringify({ token: Auth.getToken(), seatNumber: Question.currentSeat() });
-      const blob = new Blob([payload], { type: 'application/json' });
-      const ok = navigator.sendBeacon(`${API_BASE}/api/question/quit`, blob);
-      if (!ok) {
-        fetch(`${API_BASE}/api/question/quit`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: payload,
-          keepalive: true
-        }).catch(() => {});
-      }
-    }
-    Realtime.disconnect();
-    Mouse.stop();
-  });
-
-  // 모달
+  // 에러 모달
   const showError = (message) => {
     const modal = document.getElementById('errorModal');
     const msg = document.getElementById('errorMessage');
@@ -731,14 +698,16 @@
     modal.classList.remove('hidden');
   }
 
+  // 모달 숨기기
   const hideError = () => {
     const modal = document.getElementById('errorModal');
     if (!modal) return;
     modal.classList.add('hidden');
   }
 
+  ///////////////////////////////////////
   /* 이벤트 등록 및 초기 로드 시 이벤트 등록 로직*/
-
+  //////////////////////////////////////
   // 페이지 비활성화 시 소켓 정리(보강)
   window.addEventListener('unload', () => {
     Realtime.disconnect();
@@ -817,6 +786,76 @@
       }
     });
   });
+
+  // 페이지 종료/새로고침 시 풀이 중단 비콘 + 소켓 정리
+  window.addEventListener('beforeunload', () => {
+    if (Question.isActive() && Auth.getToken()) {
+      const payload = JSON.stringify({ token: Auth.getToken(), seatNumber: Question.currentSeat() });
+      const blob = new Blob([payload], { type: 'application/json' });
+      const ok = navigator.sendBeacon(`${API_BASE}/api/question/quit`, blob);
+      if (!ok) {
+        fetch(`${API_BASE}/api/question/quit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload,
+          keepalive: true
+        }).catch(() => {});
+      }
+    }
+    Realtime.disconnect();
+    Mouse.stop();
+  });
+
+  ///////////////////////
+  /* 전체 시작, 재시작 함수 */
+  ///////////////////////
+
+  // 전체 시작 함수(아이디 키 입력)
+  const start = async (selectedUser, key) => {
+    if (!selectedUser) {
+      showError('닉네임을 선택해주세요');
+      return;
+    }
+    if (!key) {
+      showError('키를 입력해주세요');
+      return;
+    }
+
+    // 서버 인증 및 연결
+    const success = await authenticateAndConnect(selectedUser, key);
+    if (!success) {
+      return;
+    }
+  }
+
+  // 초기 화면으로 돌아가는 로직 (resetToInit)
+  const resetToInit = async () => {
+    // 현재 문제 풀이 중이면 서버에 중단 통지
+    if (typeof Question !== 'undefined') {
+      await Question.quit();
+    }
+
+    // 마우스 정리
+    if (typeof Mouse !== 'undefined') {
+      Mouse.stop();
+    }
+
+    // 소켓 해제
+    if (typeof Realtime !== 'undefined') {
+      Realtime.disconnect();
+    }
+
+    // 인증/유저 초기화
+    if (typeof Auth !== 'undefined') Auth.reset();
+    User.setNull();
+
+    // 다른 사용자 커서 정리
+    document.querySelectorAll('.other-mouse').forEach(el => el.remove());
+    otherUsers.clear();
+
+    // 초기 화면으로
+    View.setViewState(ViewState.INIT);
+  }
   
   })();
 </script>
