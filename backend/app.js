@@ -2,17 +2,32 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const WebSocket = require('ws');
-const crypto = require('crypto'); // crypto 모듈 추가
+const crypto = require('crypto');
+const url = require('url');
 
 const app = express();
 
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://chan.gling.co.kr', 'http://localhost:3001'], // 프론트엔드 주소 추가
+  origin: ['http://localhost:5500', 'https://chan.gling.co.kr', 'http://localhost:3001'],
 }));
 
 app.use(express.json());
 
-const port = 3001; // 포트 변경 (프론트와 겹치지 않게)
+const port = 3000;
+
+/*--- 데이터 저장소 (In-Memory) ---*/
+const desks = {
+  '1': { owner: null, question: "가장 높은 산의 이름은?", answer: "에베레스트" },
+  '2': { owner: null, question: "세상에서 가장 큰 바다는?", answer: "태평양" },
+  '3': { owner: null, question: "자바스크립트의 'null'과 'undefined'의 차이점은?", answer: "타입" },
+  '4': { owner: null, question: "1, 2, 3, 5, 8, 13, ... 다음 숫자는?", answer: "21" },
+  '5': { owner: null, question: "React에서 컴포넌트의 상태를 관리하는 Hook의 이름은?", answer: "useState" },
+  '6': { owner: null, question: "HTTP 상태 코드 404가 의미하는 것은?", answer: "Not Found" },
+  '7': { owner: null, question: "'git commit'과 'git push'의 차이점은?", answer: "로컬/원격" },
+  '8': { owner: null, question: "물의 화학식은?", answer: "H2O" },
+};
+
+const clients = new Map(); // 연결된 클라이언트 관리
 
 /*--- 인증 로직 ---*/
 const SECRET_HASH_VALUE = "2466fcafe0531db08547f61d39bd340224e92f3410d58837e04cb845d790b970";
@@ -30,13 +45,66 @@ app.post('/api/verify-key', (req, res) => {
 
   const keyHash = hash(key);
   if (keyHash === SECRET_HASH_VALUE) {
-    // TODO: 인증 성공 시 토큰 발급 로직 추가 예정
     res.json({ success: true, message: '인증에 성공했습니다.' });
   } else {
     res.status(401).json({ success: false, message: '키가 올바르지 않습니다.' });
   }
 });
+
 /*--- API 라우트 ---*/
+// 자리 목록 조회 API
+app.get('/api/desks', (req, res) => {
+  const deskOwners = Object.entries(desks).reduce((acc, [id, { owner }]) => {
+    acc[id] = { owner };
+    return acc;
+  }, {});
+  res.json(deskOwners);
+});
+
+// 특정 자리의 질문 조회 API
+app.get('/api/desks/:id/question', (req, res) => {
+  const { id } = req.params;
+  const desk = desks[id];
+
+  if (!desk) {
+    return res.status(404).json({ error: '존재하지 않는 자리입니다.' });
+  }
+
+  if (desk.owner) {
+    return res.status(409).json({ error: `이미 ${desk.owner}님이 차지한 자리입니다.` });
+  }
+
+  res.json({ question: desk.question });
+});
+
+// 정답 제출 API
+app.post('/api/desks/:id/answer', (req, res) => {
+  const { id } = req.params;
+  const { answer, user } = req.body;
+  const desk = desks[id];
+
+  if (!desk) {
+    return res.status(404).json({ error: '존재하지 않는 자리입니다.' });
+  }
+
+  if (desk.owner) {
+    return res.status(409).json({ error: `이미 ${desk.owner}님이 차지한 자리입니다.` });
+  }
+
+  if (!answer || !user) {
+    return res.status(400).json({ error: '정답과 사용자 이름을 모두 입력해야 합니다.' });
+  }
+
+  const isCorrect = desk.answer.trim().toLowerCase() === answer.trim().toLowerCase();
+
+  if (isCorrect) {
+    desk.owner = user; // 자리 주인 변경
+    broadcast({ type: 'desk_claimed', payload: { deskId: id, user } });
+    res.json({ success: true, message: '정답입니다! 자리를 차지했습니다.' });
+  } else {
+    res.status(400).json({ success: false, message: '틀렸습니다. 다시 시도해보세요.' });
+  }
+});
 
 // test api
 app.get('/', (req, res) => {
@@ -103,27 +171,62 @@ const server = http.createServer(app);
 // 웹소켓 서버 생성
 const wss = new WebSocket.Server({ server });
 
-// 웹소켓 연결 처리
-wss.on('connection', (ws) => {
-  console.log('클라이언트가 연결되었습니다.');
+// 모든 클라이언트에게 메시지 브로드캐스트하는 함수
+const broadcast = (message) => {
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify(message));
+    }
+  });
+}
 
-  ws.on('message', (message) => {
-    console.log('받은 메시지:', message);
-    // 모든 클라이언트에게 메시지 브로드캐스트
-    wss.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
+wss.on('connection', (ws, req) => {
+  const parameters = new URL(req.url, `http://${req.headers.host}`).searchParams;
+  const username = parameters.get('username');
+
+  if (!username || clients.has(username)) {
+    ws.terminate();
+    return;
+  }
+
+  const clientInfo = { ws, username, x: 0, y: 0 };
+  clients.set(username, clientInfo);
+  console.log(`클라이언트 연결: ${username}`);
+
+  // 새 접속자에게 기존 사용자들의 커서 위치 전송
+  const allCursors = {};
+  for (const [name, info] of clients.entries()) {
+    if (name !== username) {
+      allCursors[name] = { x: info.x, y: info.y };
+    }
+  }
+  ws.send(JSON.stringify({ type: 'all_cursors', payload: allCursors }));
+
+  // 기존 사용자들에게 새 접속자 알림
+  broadcast({ type: 'new_user_connected', payload: { username, x: 0, y: 0 } });
+
+  ws.on('message', (rawMessage) => {
+    try {
+      const message = JSON.parse(rawMessage);
+      if (message.type === 'mouse_move') {
+        clientInfo.x = message.payload.x;
+        clientInfo.y = message.payload.y;
+        broadcast({ 
+          type: 'cursor_update', 
+          payload: { username, x: clientInfo.x, y: clientInfo.y }
+        });
       }
-    });
+    } catch (error) {
+      console.error('잘못된 메시지 형식:', error);
+    }
   });
 
   ws.on('close', () => {
-    console.log('클라이언트 연결이 끊겼습니다.');
+    clients.delete(username);
+    broadcast({ type: 'user_disconnect', payload: { username } });
+    console.log(`클라이언트 연결 끊김: ${username}`);
   });
-
-  ws.send('웹소켓 서버에 오신 것을 환영합니다!');
 });
-
 
 server.listen(port, () => {
   console.log(`서버가 http://localhost:${port} 에서 실행 중입니다. 🚀`);

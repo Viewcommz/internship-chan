@@ -7,152 +7,298 @@
   <title>자리배치를 해봅시다</title>
   <!-- tailwind css -->
   <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .cursor-style {
+      position: absolute;
+      width: max-content;
+      padding: 2px 8px;
+      border-radius: 12px;
+      color: white;
+      font-size: 12px;
+      white-space: nowrap;
+      pointer-events: none;
+      transition: top 0.05s, left 0.05s;
+      z-index: 100;
+    }
+    .remote-cursor {
+      background-color: #4A90E2; /* Blue */
+    }
+    .local-cursor {
+      background-color: #F5A623; /* Orange */
+    }
+    .desk-button[disabled] {
+      background-color: #E5E7EB; /* gray-200 */
+      color: #4B5563; /* gray-600 */
+      cursor: not-allowed;
+    }
+    .hallway-text {
+        writing-mode: vertical-rl;
+        text-orientation: mixed;
+        transform: rotate(180deg); /* 글자 바로 세우기 */
+    }
+  </style>
 </head>
 <script>
   /* 화면 분기 로직 */
-
-  // 화면을 안 보이게 세팅하는 함수
   const setHiddenView = (targetId) => {
     const el = document.getElementById(targetId);
     if (!el) return;
     el.classList.add('hidden');
   }
 
-  // 화면을 보이게 세팅하는 함수
   const setShowView = (targetId) => {
     const el = document.getElementById(targetId);
     if (!el) return;
     el.classList.remove('hidden');
   }
 
-  // 화면 상태  
   const ViewState = {
     INIT: "initView",
     SELECT: "selectView",
     QUESTION: "questionView"
   };
 
-  // 화면 관리 객체
   const View = (() => {
-    let currentView = null // 외부 접근 불가
-
-    // 현재 화면 상태 조회
-    const getCurrentView = () => {
-      return currentView;
-    }
-
-    // 화면 상태 set 
-    const setViewState = (state) => { // 인자: 상태
-      // 인증된 유저만 자리선택 페이지 이동 가능
-      if (state == ViewState.SELECT) {
-        if (!User.getUser()) return;
-      }
-      // 화면 변화 로직
+    let currentView = null
+    const getCurrentView = () => currentView;
+    const setViewState = (state) => {
+      if (state === ViewState.SELECT && !User.getUser()) return;
       [...Object.values(ViewState)].forEach(setHiddenView);
       setShowView(state);
       currentView = state
     }
-
-    return Object.freeze({
-      getCurrentView,
-      setViewState
-    });
-  })(); // 즉시 실행
-
-  /* 키 검증 로직 -> 추 후 백엔드로! */
-  // 키 (해시값)
-  const SECRET_HASH_VALUE = "2466fcafe0531db08547f61d39bd340224e92f3410d58837e04cb845d790b970";
-
-  // SHA-256 해시 함수 (hex)
-  const hash = async (text) => {
-    const data = new TextEncoder().encode(text);
-    const digest = await crypto.subtle.digest('SHA-256', data);
-    const bytes = Array.from(new Uint8Array(digest));
-    return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-
-  // 키 검증
-  const verifyKey = async (key) => {
-    const keyHash = await hash(key);
-    return keyHash === SECRET_HASH_VALUE;
-  }
+    return Object.freeze({ getCurrentView, setViewState });
+  })();
 
   /* 유저 선택 로직 */
   const Users = {
-    gray: "그레이",
-    cindy: "신디",
-    estelle: "에스텔",
-    gardener: "가드너",
-    chan: "찬",
-    kitty: "키티",
+    gray: "그레이", cindy: "신디", estelle: "에스텔", 
+    gardener: "가드너", chan: "찬", kitty: "키티",
   }
 
-  // 유저 관리 객체
   const User = (() => {
-    let currentUser = null // 외부 접근 불가
-
-    // 현재 유저 조회(인증된)
-    const getUser = () => {
-      return currentUser;
-    }
-
-    // 유저 선택(이 함수를 통해서만 유저 변경)
+    let currentUser = null
+    const getUser = () => currentUser;
     const setUser = async (user, key) => {
-      if (!user) {
-        showError('닉네임을 선택해주세요');
+      if (!user) { showError('닉네임을 선택해주세요'); return false; }
+      if (!key) { showError('키를 입력해주세요'); return false; }
+      try {
+        const response = await fetch('http://localhost:3000/api/verify-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user, key })
+        });
+        if (!response.ok) {
+          const errorData = await response.json();
+          showError(errorData.message || '키가 틀렸어요');
+          return false;
+        }
+        currentUser = user;
+        return true;
+      } catch (error) {
+        console.error('인증 API 호출 중 오류 발생:', error);
+        showError('서버와 통신할 수 없습니다.');
         return false;
       }
-      if (!key) {
-        showError('키를 입력해주세요');
-        return false;
-      }
-      if (!(await verifyKey(key))) {
-        showError('키가 틀렸어요');
-        return false;
-      }
-
-      currentUser = user
-      return true;
     }
+    const setNull = () => { currentUser = null; }
+    return Object.freeze({ getUser, setUser, setNull });
+  })();
 
-    // 유저를 널로 바꾸는 함수(이미 해당 닉네임으로 서버에 소켓 연결 시)
-    const setNull = () => {
-      currentUser = null
+  /* 웹소켓, 커서, 퀴즈 로직 */
+  let ws = null;
+  let currentDeskId = null;
+  const remoteCursors = new Map();
+  let lastMove = 0;
+
+  const connectWebSocket = (username) => {
+    if (ws) ws.close();
+    ws = new WebSocket(`ws://localhost:3000?username=${username}`);
+
+    const localCursorEl = document.getElementById('local-cursor');
+    localCursorEl.textContent = Users[username] || username;
+    localCursorEl.classList.remove('hidden');
+
+    ws.onopen = () => {
+      console.log('웹소켓 연결 성공!');
+      const selectView = document.getElementById('selectView');
+      selectView.addEventListener('mousemove', (e) => {
+        localCursorEl.style.left = `${e.clientX}px`;
+        localCursorEl.style.top = `${e.clientY}px`;
+
+        const now = Date.now();
+        if (now - lastMove > 50) {
+          lastMove = now;
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'mouse_move', payload: { x: e.clientX, y: e.clientY } }));
+          }
+        }
+      });
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        handleWebSocketMessage(JSON.parse(event.data));
+      } catch (error) { console.error('잘못된 메시지 형식:', event.data); }
+    };
+
+    ws.onclose = () => {
+      console.log('웹소켓 연결이 끊겼습니다.');
+      if (User.getUser()) {
+        showError('다른 곳에서 접속했거나 서버와 연결이 끊겼습니다.');
+        backInit();
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('웹소켓 오류:', error);
+      showError('웹소켓 연결에 실패했습니다.');
+      backInit();
+    };
+  }
+
+  const handleWebSocketMessage = (message) => {
+    const { type, payload } = message;
+    const cursorContainer = document.getElementById('cursor-container');
+    if (!cursorContainer) return;
+
+    switch (type) {
+      case 'all_cursors':
+        for (const [username, pos] of Object.entries(payload)) {
+          updateCursor(username, pos.x, pos.y, cursorContainer);
+        }
+        break;
+      case 'new_user_connected':
+      case 'cursor_update':
+        updateCursor(payload.username, payload.x, payload.y, cursorContainer);
+        break;
+      case 'user_disconnect':
+        removeCursor(payload.username);
+        break;
+      case 'desk_claimed':
+        updateSingleDesk(payload.deskId, payload.user);
+        if (currentDeskId === payload.deskId) {
+            View.setViewState(ViewState.SELECT);
+        }
+        break;
     }
+  }
 
-    return Object.freeze({
-      getUser,
-      setUser,
-      setNull
-    });
-  })(); // 즉시 실행
+  const updateCursor = (username, x, y, container) => {
+    if (username === User.getUser()) return;
+    let cursorEl = remoteCursors.get(username);
+    if (!cursorEl) {
+      cursorEl = document.createElement('div');
+      cursorEl.className = 'cursor-style remote-cursor';
+      cursorEl.textContent = Users[username] || username;
+      container.appendChild(cursorEl);
+      remoteCursors.set(username, cursorEl);
+    }
+    cursorEl.style.left = `${x}px`;
+    cursorEl.style.top = `${y}px`;
+  }
+
+  const removeCursor = (username) => {
+    const cursorEl = remoteCursors.get(username);
+    if (cursorEl) {
+      cursorEl.remove();
+      remoteCursors.delete(username);
+    }
+  }
+
+  const updateSingleDesk = (deskId, ownerName) => {
+      const deskButton = document.getElementById(`desk${deskId}`);
+      if (deskButton) {
+          deskButton.textContent = Users[ownerName] || ownerName;
+          deskButton.disabled = true;
+      }
+  }
+
+  const updateAllDesks = async () => {
+    try {
+      const response = await fetch('http://localhost:3000/api/desks');
+      const desks = await response.json();
+      for (const [id, { owner }] of Object.entries(desks)) {
+        const deskButton = document.getElementById(`desk${id}`);
+        if (deskButton) {
+          if (owner) {
+            deskButton.textContent = Users[owner] || owner;
+            deskButton.disabled = true;
+          } else {
+            deskButton.textContent = id;
+            deskButton.disabled = false;
+          }
+        }
+      }
+    } catch (error) {
+      console.error('자리 정보 로딩 실패:', error);
+      showError('자리 정보를 불러오는 데 실패했습니다.');
+    }
+  }
+
+  const question = async (deskId) => {
+    try {
+        const response = await fetch(`http://localhost:3000/api/desks/${deskId}/question`);
+        if (!response.ok) {
+            const err = await response.json();
+            showError(err.error || '질문을 불러올 수 없습니다.');
+            return;
+        }
+        const data = await response.json();
+        currentDeskId = deskId;
+        document.getElementById('question-text').textContent = data.question;
+        document.getElementById('answer-input').value = '';
+        View.setViewState(ViewState.QUESTION);
+    } catch (error) {
+        showError('질문 로딩 중 오류가 발생했습니다.');
+    }
+  }
+
+  const submitAnswer = async () => {
+    const answer = document.getElementById('answer-input').value;
+    const user = User.getUser();
+    if (!answer) {
+        showError('정답을 입력해주세요.');
+        return;
+    }
+    try {
+        const response = await fetch(`http://localhost:3000/api/desks/${currentDeskId}/answer`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ answer, user })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            showError(data.message || '정답 처리 중 오류 발생');
+        } else {
+            showError('정답입니다! 잠시 후 자동으로 화면이 바뀝니다.');
+        }
+    } catch (error) {
+        showError('정답 제출 중 오류가 발생했습니다.');
+    }
+  }
   
-  // 이미 서버에 닉네임 로그인 시 -> 초기 화면으로
-  // 초기 화면으로 돌아가는 로직 
   const backInit = () => {
-    User.setNull()
-    View.setViewState(ViewState.INIT)
+    if (ws) { ws.onclose = null; ws.close(); }
+    remoteCursors.forEach(c => c.remove());
+    remoteCursors.clear();
+    document.getElementById('local-cursor').classList.add('hidden');
+    User.setNull();
+    View.setViewState(ViewState.INIT);
   }
 
   const start = async (selectedUser, key) => {
-    // 입력된 값으로 인증 실행
     const ok = await User.setUser(selectedUser, key);
     if (!ok) return;
-
-    // 성공 시 자리선택 화면으로 이동
     View.setViewState(ViewState.SELECT);
+    await updateAllDesks();
+    connectWebSocket(selectedUser);
   }
 
-  // 문서 로드 시 실행
   document.addEventListener('DOMContentLoaded', () => {
-    // 초기 화면 세팅
     View.setViewState(ViewState.INIT);
-
-    // 유저 선택창 초기 세팅
     const userSelect = document.getElementById('user-select');
-
     if (!userSelect) showError("dom 로딩 에러");
-
     Object.entries(Users).forEach(([value, label]) => {
       const option = document.createElement('option');
       option.value = value;
@@ -160,23 +306,16 @@
       userSelect.appendChild(option);
     });
 
-    // 시작 버튼 클릭 시 실행
     const startBtn = document.getElementById('startBtn');
-
     if (!startBtn) showError("dom 로딩 에러");
-
     startBtn.addEventListener('click', () => {
-      // 누른 순간의 dom을 가져와야 함
       const userSelect = document.getElementById('user-select');
       const selectedUser = userSelect ? userSelect.value : '';
-
       const keyInput = document.getElementById('keyInput');
       const key = keyInput ? keyInput.value.trim() : '';
-
       start(selectedUser, key);
     });
 
-    // 모달
     document.getElementById('errorCloseBtn')?.addEventListener('click', hideError);
     document.getElementById('errorModal')?.addEventListener('click', (e) => {
       if (e.target.id === 'errorModal') hideError();
@@ -184,9 +323,10 @@
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') hideError();
     });
+    document.getElementById('answer-submit-btn').addEventListener('click', submitAnswer);
+    document.getElementById('answer-close-btn').addEventListener('click', () => View.setViewState(ViewState.SELECT));
   });
 
-  // 모달
   const showError = (message) => {
     const modal = document.getElementById('errorModal');
     const msg = document.getElementById('errorMessage');
@@ -202,102 +342,82 @@
   }
 </script>
 
-<body class="w-screen h-screen">
+<body class="w-screen h-screen bg-gray-100">
   <!-- 에러 모달 -->
-  <div id="errorModal" class="hidden fixed inset-0 z-50 bg-black/40 backdrop-blur-sm">
-    <div
-      class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[320px] rounded-lg bg-white p-4 shadow-lg">
+  <div id="errorModal" class="hidden fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center">
+    <div class="w-[320px] rounded-lg bg-white p-4 shadow-lg">
       <div class="mb-3 text-base font-semibold">알림</div>
       <div id="errorMessage" class="mb-4 text-sm text-gray-700">오류가 발생했습니다.</div>
       <div class="flex justify-end gap-2">
-        <button id="errorCloseBtn"
-          class="px-3 py-1.5 rounded-md bg-blue-600 text-white text-sm hover:bg-blue-700 active:scale-[0.98]">확인</button>
+        <button id="errorCloseBtn" class="px-3 py-1.5 rounded-md bg-blue-600 text-white text-sm hover:bg-blue-700 active:scale-[0.98]">확인</button>
       </div>
     </div>
   </div>
 
   <!-- 초기 화면 -->
   <div id="initView" class="w-full h-full">
-    <div class=" w-full h-full flex flex-col justify-around items-center">
-      <header class="text-[80px]">
+    <div class="w-full h-full flex flex-col justify-center items-center gap-10">
+      <header class="text-5xl md:text-7xl font-bold text-gray-800">
         <h1>내 자리는 어디에?</h1>
       </header>
-
-      <main class="flex flex-col">
-        <div class="w-[250px] h-[60px] text-[20px]">
-          <!-- 동적으로 채워짐 -->
-          <select id="user-select"></select>
-        </div>
-
-        <div class="flex gap-4">
-          <input id="keyInput"
-            class="w-[250px] h-[60px] rounded-[10px] border border-gray-300 px-3 text-[18px] outline-none focus:border-blue-500"
-            placeholder="🗝️키를 입력해주세요" />
-
-          <button id="startBtn"
-            class="cursor-pointer w-[100px] h-[60px] rounded-[10px] text-[20px] bg-blue-600 text-white hover:bg-blue-700 active:scale-[0.98] transition">
-            시작!
-          </button>
+      <main class="flex flex-col gap-4 w-full max-w-xs md:max-w-sm">
+        <select id="user-select" class="w-full h-14 px-3 text-lg border border-gray-300 rounded-lg outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"></select>
+        <div class="flex gap-2">
+          <input id="keyInput" class="flex-grow h-14 px-3 text-lg border border-gray-300 rounded-lg outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="🗝️ 키를 입력해주세요" />
+          <button id="startBtn" class="w-24 h-14 rounded-lg text-lg bg-blue-600 text-white hover:bg-blue-700 active:scale-[0.98] transition">시작!</button>
         </div>
       </main>
-
-      <footer>
-        <p>❄️chan-intership clone coding</p>
+      <footer class="text-gray-500">
+        <p>❄️ chan-internship clone coding</p>
       </footer>
     </div>
   </div>
 
   <!-- 자리 선택 화면 -->
-  <div id="selectView" class="w-full h-full hidden">
-    <div class="w-full h-full p-40 flex items-center justify-center">
-      <!-- 2행 × 3열(Grid). 가운데 열은 복도, 위/아래로 절반 분할하여 4개 구역 + 중앙 복도 -->
-      <div class="grid grid-rows-2 [grid-template-columns:1fr_64px_1fr] gap-4 w-full">
-
-
+  <div id="selectView" class="w-full h-full hidden relative overflow-hidden">
+    <div id="cursor-container" class="absolute inset-0 pointer-events-none">
+      <div id="local-cursor" class="cursor-style local-cursor hidden"></div>
+    </div>
+    <div class="w-full h-full p-4 sm:p-8 md:p-16 lg:p-24 xl:p-40 flex items-center justify-center">
+      <div class="grid grid-rows-2 [grid-template-columns:1fr_auto_1fr] gap-6 w-full max-w-5xl mx-auto">
         <!-- 안쪽 구역 -->
-        <div class="border rounded-md p-4 flex flex-col gap-4">
-          <div class="text-sm font-semibold text-gray-700">안쪽</div>
-          <div class="grid grid-cols-2 gap-3">
-            <button id="desk5" onclick="question('5')"
-              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">5</button>
-            <button id="desk6" onclick="question('6')"
-              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">6</button>
-            <button id="desk7" onclick="question('7')"
-              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">7</button>
-            <button id="desk8" onclick="question('8')"
-              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">8</button>
+        <div class="border rounded-xl bg-white/70 backdrop-blur-sm shadow-lg p-4 flex flex-col gap-4">
+          <div class="text-center text-lg font-bold text-gray-700">창가</div>
+          <div class="grid grid-cols-2 gap-4">
+            <button id="desk5" onclick="question('5')" class="desk-button border rounded-lg py-5 hover:bg-gray-50 active:scale-95 transition font-semibold text-gray-800">5</button>
+            <button id="desk6" onclick="question('6')" class="desk-button border rounded-lg py-5 hover:bg-gray-50 active:scale-95 transition font-semibold text-gray-800">6</button>
+            <button id="desk7" onclick="question('7')" class="desk-button border rounded-lg py-5 hover:bg-gray-50 active:scale-95 transition font-semibold text-gray-800">7</button>
+            <button id="desk8" onclick="question('8')" class="desk-button border rounded-lg py-5 hover:bg-gray-50 active:scale-95 transition font-semibold text-gray-800">8</button>
           </div>
         </div>
 
-        <!-- 가운데: 복도 (세로로 길게, 상/하 모두 관통) -->
-        <div class="row-span-2 flex items-center justify-center">
-          <div class="w-[40px] h-full bg-gray-300 text-center"> 복도 </div>
+        <!-- 가운데: 복도 -->
+        <div class="row-span-2 flex items-center justify-center px-4">
+          <div class="w-full h-full bg-gray-200/80 rounded-lg flex items-center justify-center">
+            <span class="hallway-text text-lg font-bold text-gray-500">복도</span>
+          </div>
         </div>
 
         <!-- 라운지/공용 공간 -->
-        <div class="border rounded-md p-4 flex flex-col gap-2">
-          <div class="text-sm font-semibold text-gray-700">회의실</div>
+        <div class="border rounded-xl bg-white/70 backdrop-blur-sm shadow-lg p-4 flex flex-col gap-2 justify-center items-center">
+          <div class="text-lg font-bold text-gray-700">회의실</div>
           <div class="text-sm text-gray-500">회의/대기 공간</div>
         </div>
 
         <!-- 비밀의 방 -->
-        <div class="border rounded-md p-4 flex flex-col gap-2">
-          <div class="text-sm font-semibold text-gray-700">비밀의 방</div>
+        <div class="border rounded-xl bg-white/70 backdrop-blur-sm shadow-lg p-4 flex flex-col gap-2 justify-center items-center">
+          <div class="text-lg font-bold text-gray-700">비밀의 방</div>
           <div class="text-sm text-gray-500">입장 제한 구역</div>
         </div>
 
         <!-- 사무실 구역 -->
-        <div class="border rounded-md p-4 flex flex-col gap-4">
-          <div class="text-sm font-semibold text-gray-700">사무실</div>
-          <div class="grid grid-cols-2 gap-3">
-            <button id="desk1" onclick="question('1')"
-              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">1</button>
-            <button id="desk2" onclick="question('2')"
-              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">2</button>
-            <button id="desk3" onclick="question('3')"
-              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">3</button>
-            <button id="desk4" onclick="question('4')"
-              class="border rounded-md py-4 hover:bg-gray-50 active:scale-95 transition">4</button>
+        <div class="border rounded-xl bg-white/70 backdrop-blur-sm shadow-lg p-4 flex flex-col gap-4">
+          <div class="text-center text-lg font-bold text-gray-700">사무실</div>
+          <div class="grid grid-cols-2 gap-4">
+            <button id="desk1" onclick="question('1')" class="desk-button border rounded-lg py-5 hover:bg-gray-50 active:scale-95 transition font-semibold text-gray-800">1</button>
+            <button id="desk2" onclick="question('2')" class="desk-button border rounded-lg py-5 hover:bg-gray-50 active:scale-95 transition font-semibold text-gray-800">2</button>
+            <button id="desk3" onclick="question('3')" class="desk-button border rounded-lg py-5 hover:bg-gray-50 active:scale-95 transition font-semibold text-gray-800">3</button>
+            <button id="desk4" onclick="question('4')" class="desk-button border rounded-lg py-5 hover:bg-gray-50 active:scale-95 transition font-semibold text-gray-800">4</button>
           </div>
         </div>
       </div>
@@ -305,8 +425,16 @@
   </div>
 
   <!-- 퀴즈 화면 -->
-  <div id="questionView" class="w-full h-full hidden">
-
+  <div id="questionView" class="hidden fixed inset-0 z-40 bg-black/40 backdrop-blur-sm flex items-center justify-center">
+    <div class="w-full max-w-md rounded-lg bg-white p-6 shadow-lg flex flex-col gap-4">
+        <h2 class="text-xl font-bold">퀴즈</h2>
+        <p id="question-text" class="text-gray-700">질문이 여기에 표시됩니다.</p>
+        <input id="answer-input" class="w-full h-12 px-3 text-base border border-gray-300 rounded-lg outline-none focus:border-blue-500" placeholder="정답을 입력하세요" />
+        <div class="flex justify-end gap-2">
+            <button id="answer-close-btn" class="px-4 py-2 rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300">닫기</button>
+            <button id="answer-submit-btn" class="px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-700">제출</button>
+        </div>
+    </div>
   </div>
 </body>
 
