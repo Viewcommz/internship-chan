@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>자리배치를 해봅시다</title>
+  <!-- tailwind css -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Socket.IO Client -->
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<script>
+  (() => {
+    'use strict';
+  // API 서버 URL
+  // const API_BASE = 'http://localhost:3000';
+  const API_BASE = 'https://chan-api.gling.co.kr';
+  
+  /////////////////  
+  /* 화면 분기 로직 */
+  ////////////////
+  
+  // 화면을 안 보이게 세팅하는 함수
+  const setHiddenView = (targetId) => {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+    el.classList.add('hidden');
+  }
+
+  // 화면을 보이게 세팅하는 함수
+  const setShowView = (targetId) => {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+    el.classList.remove('hidden');
+  }
+
+  // 화면 상태  
+  const ViewState = {
+    INIT: "initView",
+    SELECT: "selectView",
+    QUESTION: "questionView"
+  };
+
+  // 화면 관리 객체
+  const View = (() => {
+    let currentView = null // 외부 접근 불가
+
+    // 현재 화면 상태 조회
+    const getCurrentView = () => {
+      return currentView;
+    }
+
+    // 화면 상태 set 
+    const setViewState = (state) => { // 인자: 상태
+      // 인증된 유저만 자리선택 페이지 이동 가능
+      if (state == ViewState.SELECT) {
+        if (!User.getUser()) return;
+      }
+      // 화면 변화 로직
+      [...Object.values(ViewState)].forEach(setHiddenView);
+      setShowView(state);
+      currentView = state
+    }
+
+    return Object.freeze({
+      getCurrentView,
+      setViewState
+    });
+  })(); // 즉시 실행
+
+  /////////////////  
+  /* 유저 인증 로직 */
+  ////////////////
+
+  /* 유저 선택 로직 */
+  const Users = {
+    gray: "그레이",
+    cindy: "신디",
+    estelle: "에스텔",
+    gardener: "가드너",
+    chan: "찬",
+    kitty: "키티",
+  }
+
+  // 유저 관리 객체
+  const User = (() => {
+    let currentUser = null // 외부 접근 불가
+
+    // 현재 유저 조회(인증된)
+    const getUser = () => {
+      return currentUser;
+    }
+
+    // 유저 선택(이 함수를 통해서만 유저 변경)
+    const setUser = (user) => {
+      currentUser = user;
+    }
+
+    // 유저를 널로 바꾸는 함수(이미 해당 닉네임으로 서버에 소켓 연결 시)
+    const setNull = () => {
+      currentUser = null
+    }
+
+    return Object.freeze({
+      getUser,
+      setUser,
+      setNull
+    });
+  })(); // 즉시 실행
+
+  /* 인증 로직 */
+  const Auth = (() => {
+    let token = null;
+    let exp = null;
+    let timer = null;
+
+    const getToken = () => token;
+    const getExp = () => exp;
+
+    const clearTimer = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const reset = () => {
+      clearTimer();
+      token = null;
+      exp = null;
+    };
+
+    /**
+     * 로그인(토큰 발급) + 만료 알림 예약
+     * onExpiring: () => void (선택) - 만료 60초 전에 호출
+     */
+    const login = async (username, key, { onExpiring } = {}) => {
+      const response = await fetch(`${API_BASE}/api/auth/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, key })
+      });
+      const data = await response.json();
+
+      if (response.status === 409) {
+        showError('이미 접속 중인 유저입니다');
+        return false;
+      }
+      if (!response.ok) {
+        showError(data.error || '인증 실패');
+        return false;
+      }
+
+      token = data.token;
+      exp = data.exp || null;
+      User.setUser(username);
+
+      clearTimer();
+      if (exp && typeof onExpiring === 'function') {
+        const warnIn = Math.max(0, exp - Date.now() - 60_000);
+        timer = setTimeout(() => { onExpiring(); }, warnIn);
+      }
+      return true;
+    };
+
+    return Object.freeze({
+      login,
+      getToken,
+      getExp,
+      reset,
+      clearTimer
+    });
+  })(); // 즉시 실행
+
+  /////////////////////////
+  /* 마우스 로직 (나 + 타인) */
+  ////////////////////////
+  
+  /* 내 마우스 관련 로직 */
+  const Mouse = (() => {
+    let lastSent = 0;
+    let handler = null;
+
+    const ensureStyle = () => {
+      if (document.getElementById('mouse-style')) return;
+      const style = document.createElement('style');
+      style.id = 'mouse-style';
+      style.textContent = `
+        @keyframes float-name { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-3px)} }
+        @keyframes glow-pulse { 0%,100%{box-shadow:0 0 20px rgba(34,197,94,.5)} 50%{box-shadow:0 0 30px rgba(34,197,94,.8)} }
+        .my-mouse-cursor{width:20px;height:20px;background:linear-gradient(135deg,#22c55e,#16a34a);border-radius:50%;border:3px solid #fff;box-shadow:0 0 20px rgba(34,197,94,.5);animation:glow-pulse 2s ease-in-out infinite;position:relative}
+        .my-mouse-name{position:absolute;top:25px;left:50%;transform:translateX(-50%);padding:4px 12px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;font-size:12px;font-weight:bold;border-radius:20px;white-space:nowrap;box-shadow:0 2px 10px rgba(0,0,0,.2);animation:float-name 2s ease-in-out infinite}
+      `;
+      document.head.appendChild(style);
+    };
+
+    const createMine = () => {
+      const el = document.createElement('div');
+      el.id = 'my-mouse';
+      el.className = 'fixed pointer-events-none z-[99]';
+      el.style.left = '0';
+      el.style.top = '0';
+      el.innerHTML = `
+        <div class="my-mouse-cursor">
+          <div class="my-mouse-name">
+            ✨ ${Users[User.getUser()] || '나'}
+          </div>
+        </div>
+      `;
+      return el;
+    };
+
+    // 내 마우스 시작 함수
+    const start = () => {
+      ensureStyle();
+      document.getElementById('my-mouse')?.remove();
+
+      const myMouse = createMine();
+      document.body.appendChild(myMouse);
+
+      handler = (e) => {
+        myMouse.style.transform = `translate(${e.clientX - 10}px, ${e.clientY - 10}px)`;
+        myMouse.style.transition = 'transform 0.08s ease-out';
+
+        const s = Realtime.getSocket();
+        if (!s || !s.connected) return;
+
+        const now = Date.now();
+        if (now - lastSent < 50) return;
+        lastSent = now;
+
+        const x = (e.clientX / window.innerWidth) * 100;
+        const y = (e.clientY / window.innerHeight) * 100;
+
+        s.emit('mouse:move', { x, y });
+      };
+
+      document.addEventListener('mousemove', handler);
+    };
+
+    const stop = () => {
+      if (handler) {
+        document.removeEventListener('mousemove', handler);
+        handler = null;
+      }
+      document.getElementById('my-mouse')?.remove();
+    };
+
+    return Object.freeze({ start, stop });
+  })(); // 즉시 실행
+
+  // 랜덤 색상 생성 함수
+  const getRandomColor = () => {
+    // Tailwind 색상 배열 (인라인 스타일로 사용)
+    const colors = [
+      { bg: '#3B82F6', name: 'blue' },     // blue-500
+      { bg: '#EF4444', name: 'red' },      // red-500
+      { bg: '#A855F7', name: 'purple' },   // purple-500  
+      { bg: '#EC4899', name: 'pink' },     // pink-500
+      { bg: '#6366F1', name: 'indigo' },   // indigo-500
+      { bg: '#F97316', name: 'orange' },   // orange-500
+      { bg: '#14B8A6', name: 'teal' },     // teal-500
+      { bg: '#06B6D4', name: 'cyan' },     // cyan-500
+      { bg: '#10B981', name: 'emerald' }   // emerald-500
+    ];
+    return colors[Math.floor(Math.random() * colors.length)];
+  }
+  
+  /* 다른 사람 마우스 로직 */
+  let otherUsers = new Map(); // 다른 유저들의 마우스 위치
+
+  // 다른 유저 마우스 업데이트
+  const updateOtherUserMouse = (socketId, username, x, y) => {
+    let mouseEl = document.getElementById(`mouse-${socketId}`);
+    
+    if (!mouseEl) {
+      // 랜덤 색상 선택
+      const colorObj = getRandomColor();
+      
+      // 새 마우스 요소 생성
+      mouseEl = document.createElement('div');
+      mouseEl.id = `mouse-${socketId}`;
+      mouseEl.className = 'other-mouse fixed pointer-events-none z-[98]';
+      mouseEl.style.left = '0';
+      mouseEl.style.top = '0';
+      mouseEl.innerHTML = `
+        <div class="relative">
+          <div class="w-4 h-4 rounded-full border-2 border-white shadow-md" style="background: linear-gradient(135deg, ${colorObj.bg}, ${colorObj.bg}dd)"></div>
+          <div class="absolute top-5 left-1/2 transform -translate-x-1/2 px-2 py-1 text-white text-xs rounded-full font-medium shadow-md whitespace-nowrap" style="background: linear-gradient(135deg, ${colorObj.bg}, ${colorObj.bg}dd)">
+            ${Users[username] || username}
+          </div>
+        </div>
+      `;
+      document.body.appendChild(mouseEl);
+      
+      // 색상 정보 저장
+      mouseEl.dataset.color = colorObj.bg;
+    }
+    
+    // 위치 업데이트 (부드러운 이동)
+    const posX = (x / 100) * window.innerWidth - 8;
+    const posY = (y / 100) * window.innerHeight - 8;
+    mouseEl.style.transform = `translate(${posX}px, ${posY}px)`;
+    mouseEl.style.transition = 'transform 0.12s ease-out';
+    
+    otherUsers.set(socketId, { username, x, y });
+  }
+
+  // 다른 유저 마우스 제거
+  const removeOtherUserMouse = (socketId) => {
+    const mouseEl = document.getElementById(`mouse-${socketId}`);
+    if (mouseEl) {
+      mouseEl.remove();
+    }
+    otherUsers.delete(socketId);
+  }
+
+  /////////////////  
+  /* 자리 배치 로직 */
+  ////////////////
+
+  /* 좌석 상태 래퍼 */
+  const Seats = (() => {
+    let current = {};
+    const get = () => current;
+    const set = (seats) => { current = seats || {}; };
+    return Object.freeze({ get, set });
+  })(); // 즉시 실행
+  
+  // 자리 상태 업데이트
+  const updateSeatsDisplay = () => {
+    Object.entries(Seats.get()).forEach(([seatNum, seat]) => {
+      const deskEl = document.getElementById(`desk${seatNum}`);
+      if (!deskEl) return;
+      
+      // 초기화
+      deskEl.className = 'border-2 rounded-xl py-2 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg relative';
+      deskEl.innerHTML = seatNum;
+      
+      if (seat.owner) {
+        // 이미 주인이 있는 자리
+        deskEl.classList.add('bg-gradient-to-br', 'from-red-100', 'to-red-200', 'border-red-400', 'cursor-not-allowed');
+        deskEl.innerHTML = `
+          <div class="text-2xl">🔒</div>
+          <div class="text-lg font-bold">${seatNum}</div>
+          <div class="text-xs text-red-600 mt-1 font-medium">${Users[seat.owner] || seat.owner}</div>
+        `;
+        deskEl.toggleAttribute('disabled', true);
+        deskEl.classList.add('cursor-not-allowed', 'opacity-80');
+      } else if (Array.isArray(seat.solving) && seat.solving.length > 0) {
+        // 누군가(여러 명) 풀이 중인 자리
+        const count = seat.solving.length;
+        deskEl.classList.add('bg-gradient-to-br', 'from-yellow-100', 'to-yellow-200', 'border-yellow-400', 'animate-pulse');
+        deskEl.innerHTML = `
+          <div class="text-2xl">⏳</div>
+          <div class="text-lg font-bold">${seatNum}</div>
+          <div class="text-xs text-yellow-700 mt-1 font-medium">풀이중${count > 1 ? `(${count})` : ''}</div>
+        `;
+        deskEl.toggleAttribute('disabled', false);
+        deskEl.classList.remove('cursor-not-allowed');       // 포인터 허용
+        deskEl.classList.add('hover:from-yellow-200','hover:to-yellow-300','hover:scale-105'); // 시각적 힌
+      } else {
+        // 빈 자리
+        deskEl.classList.add('bg-gradient-to-br', 'from-green-50', 'to-green-100', 'border-green-400', 'hover:from-green-100', 'hover:to-green-200', 'hover:scale-105');
+        deskEl.innerHTML = `
+          <div class="text-2xl">✨</div>
+          <div class="text-lg font-bold">${seatNum}</div>
+          <div class="text-xs text-green-600 mt-1 font-medium">빈 자리</div>
+        `;
+        deskEl.toggleAttribute('disabled', false);
+        deskEl.classList.remove('cursor-not-allowed', 'opacity-80');
+      }
+    });
+  }
+
+  // 인증 성공 후 초기화 
+  const handleAuthSuccess = ({ username }) => {
+    // 자리 선택 화면으로 이동
+    View.setViewState(ViewState.SELECT);
+
+    // 초기 좌석 상태 로드
+    fetch(`${API_BASE}/api/seats`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(({ seats }) => {
+        Seats.set(seats);
+        updateSeatsDisplay();
+      })
+      .catch(() => { /* 소켓 seats:update로 보정됨 */ });
+
+    // 마우스 추적 시작
+    Mouse.start();
+  };
+
+  // 서버 인증 및 소켓 연결
+  const authenticateAndConnect = async (username, key) => {
+    try {
+      const ok = await Auth.login(username, key, {
+        onExpiring: () => {
+          showError('세션이 곧 만료됩니다. 다시 로그인해주세요.');
+          resetToInit();
+        }
+      });
+      if (!ok) return false;
+
+      // 소켓 연결
+      Realtime.connect(username);
+
+      return true;
+    } catch (error) {
+      showError('서버 연결 실패: ' + error.message);
+      return false;
+    }
+  }
+
+  /* 실시간(소켓) 모듈 */
+  const Realtime = (() => {
+    let socket = null; 
+    const connect = (username) => {
+      socket = io(API_BASE);
+
+      socket.on('connect', () => {
+        socket.emit('user:auth', { username, token: Auth.getToken() });
+      });
+
+      socket.on('auth:success', (payload) => {
+        handleAuthSuccess(payload);
+      });
+
+      socket.on('auth:failed', ({ error }) => { showError(error); resetToInit(); });
+      socket.on('auth:duplicate', ({ error }) => { showError(error); resetToInit(); });
+
+      socket.on('users:list', (users) => {
+        users.forEach(user => {
+          if (user.username !== username) {
+            updateOtherUserMouse(user.socketId, user.username, user.mouseX, user.mouseY);
+          }
+        });
+      });
+
+      socket.on('user:connected', (user) => {
+        updateOtherUserMouse(user.socketId, user.username, user.mouseX, user.mouseY);
+      });
+
+      socket.on('user:disconnected', ({ socketId }) => {
+        removeOtherUserMouse(socketId);
+      });
+
+      socket.on('mouse:update', ({ socketId, username, x, y }) => {
+        updateOtherUserMouse(socketId, username, x, y);
+      });
+
+      socket.on('seats:update', ({ seats }) => {
+        Seats.set(seats);
+        updateSeatsDisplay();
+        Question.onSeatsUpdate(seats);
+      });
+
+      socket.on('answer:correct', ({ username, seatNumber }) => {
+        showFireworks(username, seatNumber);
+      });
+
+      socket.on('disconnect', () => { console.log('소켓 연결 끊김'); });
+    };
+
+    const disconnect = () => {
+      if (socket) {
+        socket.disconnect();
+        socket = null;
+      }
+    };
+
+    const getSocket = () => socket;
+
+    return Object.freeze({ connect, disconnect, getSocket });
+  })(); // 즉시 실행
+
+  /////////////////
+  /* 문제/정답 로직 */
+  ////////////////
+  const Question = (() => {
+    let current = null; // { seatNumber, question }
+    let suppressAutoAlert = false; // 내 동작으로 인한 seats:update는 알림 숨김
+
+    const isActive = () => !!current;
+    const currentSeat = () => (current ? current.seatNumber : null);
+
+    // 문제 모달
+    const showModal = (question) => {
+      const modal = document.getElementById('questionModal');
+      const questionText = document.getElementById('questionText');
+      const answerInput = document.getElementById('answerInput');
+      questionText.textContent = question;
+      answerInput.value = '';
+      modal.classList.remove('hidden');
+      answerInput.focus();
+    };
+
+    const hideModal = () => {
+      const modal = document.getElementById('questionModal');
+      modal.classList.add('hidden');
+    };
+
+    const start = async (seatNumber) => {
+      const username = User.getUser();
+      if (!username) {
+        showError('로그인이 필요합니다');
+        return;
+      }
+      try {
+        const response = await fetch(`${API_BASE}/api/question`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: Auth.getToken(), seatNumber })
+        });
+        const data = await response.json();
+
+        if (response.status === 409) {
+          showError(`이미 ${Users[data.owner] || data.owner}님이 선점한 자리입니다`);
+          return;
+        }
+        if (!response.ok) {
+          showError(data.error || '문제를 가져올 수 없습니다');
+          return;
+        }
+
+        current = { seatNumber, question: data.question };
+        showModal(data.question);
+      } catch (error) {
+        showError('서버 연결 실패: ' + error.message);
+      }
+    };
+
+    const quit = async () => {
+      if (!current || !Auth.getToken()) return;
+      const seatNum = current.seatNumber;
+      // 내가 중단하는 동안 오는 seats:update는 무시
+      suppressAutoAlert = true;
+      // 레이스 방지: 즉시 비활성화
+      current = null;
+      try {
+        await fetch(`${API_BASE}/api/question/quit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: Auth.getToken(), seatNumber: seatNum })
+        });
+      } catch (_) {
+        // ignore
+      }
+    };
+
+    const close = async () => {
+      await quit();
+      hideModal();
+    };
+
+    // 제출
+    const submit = async () => {
+      if (!current) return;
+      const answerInput = document.getElementById('answerInput');
+      const answer = answerInput.value.trim();
+      if (!answer) {
+        showError('답을 입력해주세요');
+        return;
+      }
+      try {
+        const response = await fetch(`${API_BASE}/api/answer`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: Auth.getToken(),
+            seatNumber: current.seatNumber,
+            answer
+          })
+        });
+        const data = await response.json();
+
+        if (response.ok) {
+          // 내가 정답을 맞춘 경우: 서버가 seats:update( owner=me, solving=[] )을 보냄
+          // 이 업데이트로 인한 자동 경고를 막기 위해 플래그 설정
+          suppressAutoAlert = true;
+          // 레이스 방지: 즉시 현재 상태 해제 + 모달 닫기
+          current = null;
+          hideModal();
+          showSuccess('정답입니다! 자리를 획득했습니다!');
+        } else {
+          showError(data.message || '틀렸습니다. 다시 시도해주세요');
+          answerInput.select();
+        }
+      } catch (error) {
+        showError('서버 연결 실패: ' + error.message);
+      }
+    };
+
+    // 좌석 업데이트에 따른 모달 자동 정리
+    const onSeatsUpdate = (seats) => {
+      const me = User.getUser();
+
+      // 내가 방금 종료/정답 처리 중이면 첫 업데이트는 조용히 무시
+      if (!current) {
+        if (suppressAutoAlert) {
+          suppressAutoAlert = false;
+          hideModal();
+        }
+        return;
+      }
+
+      const seat = seats[current.seatNumber];
+      if (!seat) return;
+
+      // 내가 획득한 경우: 알림/에러 없이 조용히 닫기
+      if (seat.owner && seat.owner === me) {
+        suppressAutoAlert = false;
+        current = null;
+        hideModal();
+        return;
+      }
+
+      const owned = !!seat.owner;
+      const iAmSolving = Array.isArray(seat.solving) && seat.solving.includes(me);
+
+      // 내가 의도적으로 quit한 직후의 업데이트라면 알림 없이 닫기
+      if (!iAmSolving && suppressAutoAlert) {
+        suppressAutoAlert = false;
+        current = null;
+        hideModal();
+        return;
+      }
+
+      if (owned || !iAmSolving) {
+        showError(owned ? '다른 사용자가 해당 자리를 획득했습니다.' : '다른 사용자가 문제를 풀었습니다.');
+        close();
+      }
+    };
+
+    return Object.freeze({
+      start,
+      submit,
+      close,
+      quit,
+      isActive,
+      currentSeat,
+      onSeatsUpdate
+    });
+  })(); // 즉시 실행
+
+  ///////////////////////////
+  /* 전역 모달 및 불꽃 놀이 효과 */
+  ///////////////////////////
+
+  // 불꽃놀이 효과
+  const showFireworks = (username, seatNumber) => {
+    const message = `🎉 ${Users[username] || username}님이 ${seatNumber}번 자리를 획득했습니다! 🎉`;
+    
+    // 불꽃놀이 컨테이너 생성
+    const fireworks = document.createElement('div');
+    fireworks.className = 'fixed inset-0 pointer-events-none z-[200] flex items-center justify-center';
+    fireworks.innerHTML = `
+      <div class="text-4xl font-bold text-yellow-400 animate-bounce">${message}</div>
+    `;
+    document.body.appendChild(fireworks);
+    
+    // 이모지 불꽃놀이 생성
+    for (let i = 0; i < 20; i++) {
+      setTimeout(() => {
+        const spark = document.createElement('div');
+        spark.className = 'fixed text-4xl animate-ping';
+        spark.style.left = `${Math.random() * 100}%`;
+        spark.style.top = `${Math.random() * 100}%`;
+        spark.textContent = ['🎆', '🎇', '✨', '🌟', '💫'][Math.floor(Math.random() * 5)];
+        fireworks.appendChild(spark);
+        
+        setTimeout(() => spark.remove(), 2000);
+      }, i * 100);
+    }
+    
+    // 3초 후 제거
+    setTimeout(() => fireworks.remove(), 3000);
+  }
+
+  // 성공 메시지
+  const showSuccess = (message) => {
+    const successModal = document.createElement('div');
+    successModal.className = 'fixed top-4 right-4 bg-green-500 text-white px-6 py-3 rounded-lg shadow-lg z-[150] animate-pulse';
+    successModal.textContent = message;
+    document.body.appendChild(successModal);
+    
+    setTimeout(() => successModal.remove(), 3000);
+  }
+
+  // 에러 모달
+  const showError = (message) => {
+    const modal = document.getElementById('errorModal');
+    const msg = document.getElementById('errorMessage');
+    if (!modal || !msg) return;
+    msg.textContent = message || '오류가 발생했습니다.';
+    modal.classList.remove('hidden');
+  }
+
+  // 모달 숨기기
+  const hideError = () => {
+    const modal = document.getElementById('errorModal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+  }
+
+  ///////////////////////////////////////
+  /* 이벤트 등록 및 초기 로드 시 이벤트 등록 로직*/
+  //////////////////////////////////////
+  // 페이지 비활성화 시 소켓 정리(보강)
+  window.addEventListener('unload', () => {
+    Realtime.disconnect();
+  });
+
+  // 문서 로드 시 실행
+  document.addEventListener('DOMContentLoaded', () => {
+    // 초기 화면 세팅
+    View.setViewState(ViewState.INIT);
+
+    // 유저 선택창 초기 세팅
+    const userSelect = document.getElementById('user-select');
+
+    if (!userSelect) showError("dom 로딩 에러");
+
+    Object.entries(Users).forEach(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      userSelect.appendChild(option);
+    });
+
+    // 시작 버튼 클릭 시 실행
+    const startBtn = document.getElementById('startBtn');
+
+    if (!startBtn) showError("dom 로딩 에러");
+
+    startBtn.addEventListener('click', () => {
+      // 누른 순간의 dom을 가져와야 함
+      const userSelect = document.getElementById('user-select');
+      const selectedUser = userSelect ? userSelect.value : '';
+
+      const keyInput = document.getElementById('keyInput');
+      const key = keyInput ? keyInput.value.trim() : '';
+
+      start(selectedUser, key);
+    });
+
+    // 엔터키로 시작
+    document.getElementById('keyInput')?.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        startBtn.click();
+      }
+    });
+
+    // 자리 버튼 클릭 핸들러 바인딩
+    for (let i = 1; i <= 8; i++) {
+      const el = document.getElementById(`desk${i}`);
+      el?.addEventListener('click', () => Question.start(i));
+    }
+
+    // 로그아웃 버튼(내부 함수로만 접근)
+    document.getElementById('logoutBtn')?.addEventListener('click', () => {
+      resetToInit();
+    });
+
+    // 모달 이벤트
+    document.getElementById('errorCloseBtn')?.addEventListener('click', hideError);
+    document.getElementById('errorModal')?.addEventListener('click', (e) => {
+      if (e.target.id === 'errorModal') hideError();
+    });
+
+    // 문제 모달 이벤트
+    document.getElementById('questionCloseBtn')?.addEventListener('click', () => Question.close());
+    document.getElementById('submitAnswerBtn')?.addEventListener('click', () => Question.submit());
+    document.getElementById('answerInput')?.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        Question.submit();
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        hideError();
+        Question.close();
+      }
+    });
+  });
+
+  // 페이지 종료/새로고침 시 풀이 중단 비콘 + 소켓 정리
+  window.addEventListener('beforeunload', () => {
+    if (Question.isActive() && Auth.getToken()) {
+      const payload = JSON.stringify({ token: Auth.getToken(), seatNumber: Question.currentSeat() });
+      const blob = new Blob([payload], { type: 'application/json' });
+      const ok = navigator.sendBeacon(`${API_BASE}/api/question/quit`, blob);
+      if (!ok) {
+        fetch(`${API_BASE}/api/question/quit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload,
+          keepalive: true
+        }).catch(() => {});
+      }
+    }
+    Realtime.disconnect();
+    Mouse.stop();
+  });
+
+  ///////////////////////
+  /* 전체 시작, 재시작 함수 */
+  ///////////////////////
+
+  // 전체 시작 함수(아이디 키 입력)
+  const start = async (selectedUser, key) => {
+    if (!selectedUser) {
+      showError('닉네임을 선택해주세요');
+      return;
+    }
+    if (!key) {
+      showError('키를 입력해주세요');
+      return;
+    }
+
+    // 서버 인증 및 연결
+    const success = await authenticateAndConnect(selectedUser, key);
+    if (!success) {
+      return;
+    }
+  }
+
+  // 초기 화면으로 돌아가는 로직 (resetToInit)
+  const resetToInit = async () => {
+    // 현재 문제 풀이 중이면 서버에 중단 통지
+    if (typeof Question !== 'undefined') {
+      await Question.quit();
+    }
+
+    // 마우스 정리
+    if (typeof Mouse !== 'undefined') {
+      Mouse.stop();
+    }
+
+    // 소켓 해제
+    if (typeof Realtime !== 'undefined') {
+      Realtime.disconnect();
+    }
+
+    // 인증/유저 초기화
+    if (typeof Auth !== 'undefined') Auth.reset();
+    User.setNull();
+
+    // 다른 사용자 커서 정리
+    document.querySelectorAll('.other-mouse').forEach(el => el.remove());
+    otherUsers.clear();
+
+    // 초기 화면으로
+    View.setViewState(ViewState.INIT);
+  }
+  
+  })();
+</script>
+
+<body class="w-screen h-screen">
+  <!-- 문제 모달 -->
+  <div id="questionModal" class="hidden fixed inset-0 z-50 bg-black/40 backdrop-blur-sm">
+    <div
+      class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] rounded-lg bg-white p-6 shadow-lg">
+      <div class="mb-4 text-lg font-semibold">문제</div>
+      <div id="questionText" class="mb-4 text-base text-gray-700">문제가 여기에 표시됩니다.</div>
+      <input id="answerInput" 
+        class="w-full px-3 py-2 border rounded-md outline-none focus:border-blue-500 mb-4"
+        placeholder="정답을 입력하세요" />
+      <div class="flex justify-end gap-2">
+        <button id="questionCloseBtn"
+          class="px-3 py-1.5 rounded-md bg-gray-300 text-gray-700 text-sm hover:bg-gray-400 active:scale-[0.98]">취소</button>
+        <button id="submitAnswerBtn"
+          class="px-3 py-1.5 rounded-md bg-blue-600 text-white text-sm hover:bg-blue-700 active:scale-[0.98]">제출</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 에러 모달 (z-60으로 문제 모달보다 위에 표시) -->
+  <div id="errorModal" class="hidden fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm">
+    <div
+      class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[320px] rounded-lg bg-white p-4 shadow-lg">
+      <div class="mb-3 text-base font-semibold">알림</div>
+      <div id="errorMessage" class="mb-4 text-sm text-gray-700">오류가 발생했습니다.</div>
+      <div class="flex justify-end gap-2">
+        <button id="errorCloseBtn"
+          class="px-3 py-1.5 rounded-md bg-blue-600 text-white text-sm hover:bg-blue-700 active:scale-[0.98]">확인</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 초기 화면 -->
+  <div id="initView" class="w-full h-full">
+    <div class=" w-full h-full flex flex-col justify-around items-center">
+      <header class="text-[80px]">
+        <h1>내 자리는 어디에?</h1>
+      </header>
+
+      <main class="flex flex-col">
+        <div class="w-[250px] h-[60px] text-[20px]">
+          <!-- 동적으로 채워짐 -->
+          <select id="user-select" class="w-full h-full px-3 rounded-md border"></select>
+        </div>
+
+        <div class="flex gap-4 mt-4">
+          <input id="keyInput"
+            class="w-[250px] h-[60px] rounded-[10px] border border-gray-300 px-3 text-[18px] outline-none focus:border-blue-500"
+            placeholder="🗝️키를 입력해주세요" />
+
+          <button id="startBtn"
+            class="cursor-pointer w-[100px] h-[60px] rounded-[10px] text-[20px] bg-blue-600 text-white hover:bg-blue-700 active:scale-[0.98] transition">
+            시작!
+          </button>
+        </div>
+      </main>
+
+      <footer>
+        <p>❄️chan-intership clone coding</p>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 자리 선택 화면 -->
+  <div id="selectView" class="w-full h-full hidden bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50 overflow-hidden">
+    <!-- 헤더 영역 -->
+    <div class=" w-full py-4 px-8 bg-white/70 backdrop-blur-sm shadow-md">
+      <div class="flex items-center justify-between">
+        <!-- 타이틀 -->
+        <div class="flex-1"></div>
+        <h2 class="text-3xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+          🏢 우리의 사무실
+        </h2>
+        <!-- 로그아웃 버튼 -->
+        <div class="flex-1 flex justify-end">
+          <button id="logoutBtn"
+            class="px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-full hover:from-red-600 hover:to-red-700 shadow-lg transition-all hover:scale-105">
+            🚪 로그아웃
+          </button>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 컨텐츠 영역 -->
+    <div class="w-full h-[calc(100%-72px)] p-8 flex items-center justify-center">
+      <!-- 2행 × 3열(Grid). 가운데 열은 복도, 위/아래로 절반 분할하여 4개 구역 + 중앙 복도 -->
+      <div class="grid grid-rows-2 [grid-template-columns:1fr_60px_1fr] gap-4 w-full max-w-5xl">
+
+        <!-- 안쪽 구역 -->
+        <div class="bg-white/80 backdrop-blur-sm border-2 border-purple-200 rounded-2xl p-6 flex flex-col gap-4 shadow-xl hover:shadow-2xl transition-shadow">
+          <div class="text-lg font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">🌸 안쪽 공간</div>
+          <div class="grid grid-cols-2 gap-4">
+            <button id="desk5"
+              class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">5</button>
+            <button id="desk6"
+              class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">6</button>
+            <button id="desk7"
+              class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">7</button>
+            <button id="desk8"
+              class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">8</button>
+          </div>
+        </div>
+
+        <!-- 가운데: 복도 (세로로 길게, 상/하 모두 관통) -->
+        <div class="row-span-2 flex items-center justify-center">
+          <div class="w-full h-full bg-gradient-to-b from-gray-200 via-gray-300 to-gray-200 rounded-2xl shadow-inner flex items-center justify-center">
+            <div class="text-gray-600 font-bold text-lg text-center">🚶 <br>복도<br>🚶</div>
+          </div>
+        </div>
+
+        <!-- 라운지/공용 공간 -->
+        <div class="bg-gradient-to-br from-blue-100 to-cyan-100 border-2 border-blue-300 rounded-2xl p-6 flex flex-col gap-2 shadow-xl">
+          <div class="text-lg font-bold text-blue-700">🏛️ 회의실</div>
+          <div class="text-sm text-blue-600">회의/대기 공간</div>
+        </div>
+
+        <!-- 비밀의 방 -->
+        <div class="bg-gradient-to-br from-gray-800 to-purple-900 border-2 border-purple-400 rounded-2xl p-6 flex flex-col gap-2 shadow-xl">
+          <div class="text-lg font-bold text-purple-300">🔮 비밀의 방</div>
+          <div class="text-sm text-purple-200">입장 제한 구역</div>
+        </div>
+
+        <!-- 사무실 구역 -->
+        <div class="bg-white/80 backdrop-blur-sm border-2 border-blue-200 rounded-2xl p-6 flex flex-col gap-4 shadow-xl hover:shadow-2xl transition-shadow">
+          <div class="text-lg font-bold bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">💼 사무실</div>
+          <div class="grid grid-cols-2 gap-4">
+            <button id="desk1"
+              class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">1</button>
+            <button id="desk2"
+              class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">2</button>
+            <button id="desk3"
+              class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">3</button>
+            <button id="desk4"
+              class="border-2 rounded-xl py-2 hover:bg-gray-50 active:scale-95 transition-all font-bold text-lg shadow-md hover:shadow-lg">4</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 퀴즈 화면 (현재 사용하지 않음, 모달로 대체) -->
+  <div id="questionView" class="w-full h-full hidden">
+  </div>
+</body>
+
+</html>
